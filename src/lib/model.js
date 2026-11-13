@@ -13,6 +13,25 @@ export const productKey = (model, color) => `${String(model || '').trim()}_${Str
 export const inventoryKey = (plant, catalogNo) => `${plant}|${catalogNo}`;
 export const orderKey = (order) => `${order.orderNo}|${order.model}|${order.color}`;
 
+export function mergeWipProgress(orders, incomingRows) {
+  const byOrderAndPlant = new Map((incomingRows || []).map((row) => [orderKey(row) + '|' + row.plant, row]));
+  const matched = new Set();
+  const updated = (orders || []).map((order) => {
+    let changed = false;
+    const progress = { ...(order.progress || {}) };
+    for (const plant of PLANTS) {
+      const key = orderKey(order) + '|' + plant.id;
+      const row = byOrderAndPlant.get(key);
+      if (!row) continue;
+      progress[plant.id] = Number(row.wipQty) || 0;
+      matched.add(key);
+      changed = true;
+    }
+    return changed ? { ...order, progress } : order;
+  });
+  return { orders: updated, matched: matched.size, unmatched: [...byOrderAndPlant.keys()].filter((key) => !matched.has(key)).length };
+}
+
 export function getPlantName(id) {
   return PLANTS.find((plant) => plant.id === id)?.name || id;
 }

@@ -4,9 +4,11 @@
 
 ## Dữ liệu
 
-- Danh mục workbook: nạp sheet `1_Danh_Muc_Va_Ma_Tran_BOM`, bảng kiểm kê của Hóa mẫu/LAF/LVF và sheet `DM_BTP_Size_LAF`.
+- Menu **Tác vụ nhập liệu** tách riêng tám luồng: đơn hàng, WIP, danh mục vật tư, BOM, kiểm kê Hóa mẫu, kiểm kê LAF, kiểm kê LVF và định mức BTP theo size LAF. Mỗi luồng có Import, Export dữ liệu và Tải mẫu trống.
+- Có thể nạp từng phần từ workbook hiện tại: danh mục/BOM từ `1_Danh_Muc_Va_Ma_Tran_BOM`; tồn kho từ từng sheet `2_Kho_Hoa_Mau`, `3_Kho_Xuong_LAF`, `4_Kho_Xuong_LVF`; định mức từ `DM_BTP_Size_LAF`.
 - File `DON HANG.xlsx`: chỉ đọc sheet `ADIDAS` và `LƯU HÓA`; sheet `BTP` được bỏ qua. Đơn ADIDAS được gán LAF, đơn LƯU HÓA được gán Hóa mẫu.
-- Repo không chứa workbook hoặc dữ liệu mẫu. Hãy nhập file tại nút **Nhập Excel** sau khi mở ứng dụng.
+- File Export là `.xlsx` theo từng tác vụ. BOM được xuất dạng danh sách dọc, nên số mã hàng-màu không bị giới hạn bởi số cột mẫu. File chỉ chứa dữ liệu đầu vào; không ghi công thức Excel. Nhu cầu, WIP, tồn lý thuyết và chênh lệch được tính trong ứng dụng.
+- Repo không chứa workbook hoặc dữ liệu mẫu. Hãy dùng **Tác vụ nhập liệu** sau khi mở ứng dụng.
 - Chưa kết nối Supabase: dữ liệu lưu trong local storage của trình duyệt hiện tại, chưa dùng chung giữa máy tính/người dùng.
 
 ## Chạy trên máy
@@ -14,6 +16,13 @@
 ```bash
 npm install
 npm run dev
+```
+
+Chạy kiểm tra và build production:
+
+```bash
+npm test
+npm run build
 ```
 
 ## Bật dữ liệu dùng chung
@@ -40,7 +49,7 @@ Repo này dùng Vite; Vercel tự phát hiện cấu hình build (`npm run build
 ## Ghi chú nghiệp vụ
 
 - Vật tư được gắn với một hoặc nhiều nhà máy; cùng STT có thể dùng ở LAF, LVF và Hóa mẫu.
-- BOM được lưu dạng từng dòng mã hàng-màu-vật tư, không cần tạo hàng trăm cột màu.
+- BOM được lưu dạng từng dòng mã hàng-màu-vật tư; bộ nhập đọc động các cột màu hiện có trong workbook và file xuất dùng danh sách dọc.
 - Kiểm kê tính tồn lý thuyết theo `Lĩnh về − Sản xuất quy đổi WIP`; chênh lệch bằng kiểm kê thực tế trừ tồn lý thuyết.
 - Dòng đơn hàng gắn với nhà máy chính; WIP được nhập riêng theo từng nhà máy.
 - Import Excel xử lý trong trình duyệt. Khi có Supabase, các bản ghi được lưu theo workspace; khi chưa cấu hình Supabase, dữ liệu chỉ ở trình duyệt đó.

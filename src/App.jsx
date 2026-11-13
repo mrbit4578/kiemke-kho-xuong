@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowDownToLine, ArrowLeftRight, Boxes, Check, ChevronDown,
-  CircleAlert, ClipboardCheck, Cloud, CloudOff, FileSpreadsheet, Filter,
+  CircleAlert, ClipboardCheck, ClipboardList, Cloud, CloudOff, FileSpreadsheet, Filter,
   Gauge, Layers3, LogOut, Menu, Package, Plus, RefreshCw, Search, Settings2,
   ShieldCheck, Upload, X,
 } from 'lucide-react';
-import { PLANTS, getInventoryRows, getPlantName, getPlantSummary, inventoryKey, money, orderKey, productKey, statusTone } from './lib/model.js';
-import { importCatalogFile, importOrderFile } from './lib/xlsx-import.js';
+import { PLANTS, getInventoryRows, getPlantName, getPlantSummary, inventoryKey, mergeWipProgress, money, orderKey, productKey, statusTone } from './lib/model.js';
+import { createTaskWorkbook, importTaskWorkbook, taskFilename } from './lib/task-workbooks.js';
 import { supabase, cloudMode } from './lib/supabase.js';
 import { ensureWorkspace, loadWorkspaceRecords, saveWorkspaceRecords } from './lib/cloud.js';
 
@@ -18,6 +18,7 @@ const navItems = [
   { id: 'inventory', label: 'Kiểm kê vật tư', icon: ClipboardCheck },
   { id: 'catalog', label: 'Danh mục & BOM', icon: Boxes },
   { id: 'norms', label: 'Định mức BTP LAF', icon: Settings2 },
+  { id: 'data-entry', label: 'Tác vụ nhập liệu', icon: ClipboardList },
 ];
 
 function readLocalState() {
@@ -51,6 +52,9 @@ function App() {
   const [toast, setToast] = useState('');
   const [modal, setModal] = useState('');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [catalogTab, setCatalogTab] = useState('materials');
+  const [busyTask, setBusyTask] = useState('');
+  const [taskErrors, setTaskErrors] = useState({});
 
   const notify = useCallback((message) => {
     setToast(message);
@@ -99,7 +103,7 @@ function App() {
   }, [hydrateCloud]);
 
   useEffect(() => {
-    const openImport = () => setModal('import');
+    const openImport = () => setPage('data-entry');
     window.addEventListener('open-import', openImport);
     return () => window.removeEventListener('open-import', openImport);
   }, []);
@@ -134,28 +138,67 @@ function App() {
     if (error) setLoginError('Email hoặc mật khẩu không đúng.');
   };
 
-  const importCatalog = async (file) => {
-    const imported = await importCatalogFile(file);
-    const next = {
-      ...data,
-      materials: mergeRows(data.materials, imported.materials, materialKey),
-      bom: mergeRows(data.bom, imported.bom, bomKey),
-      norms: mergeRows(data.norms, imported.norms, normKey),
-      inventory: { ...data.inventory, ...imported.inventory },
-    };
-    const saved = await commit(next, ['material', 'bom', 'norm', 'inventory']);
-    notify(`Đã nạp ${imported.materials.length} vật tư, ${imported.bom.length} dòng BOM và ${imported.norms.length} định mức size.`);
-    if (!saved && cloudMode) notify('Dữ liệu đã đọc nhưng chưa đồng bộ. Hãy kiểm tra kết nối Supabase.');
-    setModal('');
+  const importTask = async (taskId, file) => {
+    setBusyTask(taskId);
+    setTaskErrors((current) => ({ ...current, [taskId]: '' }));
+    try {
+      const imported = await importTaskWorkbook(taskId, file);
+      let next = data;
+      let changed = [];
+      let count = 0;
+      if (taskId === 'orders') {
+        count = imported.orders.length;
+        next = { ...data, orders: mergeRows(data.orders, imported.orders, orderKey) };
+        changed = ['order'];
+      } else if (taskId === 'wip') {
+        const result = mergeWipProgress(data.orders, imported.wip);
+        count = result.matched;
+        next = { ...data, orders: result.orders };
+        changed = ['order'];
+        if (result.unmatched) notify(`Đã cập nhật ${result.matched} dòng WIP; bỏ qua ${result.unmatched} dòng không khớp đơn hàng và nhà máy.`);
+      } else if (taskId === 'materials') {
+        count = imported.materials.length;
+        next = { ...data, materials: mergeRows(data.materials, imported.materials, materialKey) };
+        changed = ['material'];
+      } else if (taskId === 'bom') {
+        count = imported.bom.length;
+        next = { ...data, bom: mergeRows(data.bom, imported.bom, bomKey) };
+        changed = ['bom'];
+      } else if (taskId === 'norms') {
+        count = imported.norms.length;
+        next = { ...data, norms: mergeRows(data.norms, imported.norms, normKey) };
+        changed = ['norm'];
+      } else if (taskId.startsWith('inventory:')) {
+        count = Object.keys(imported.inventory).length;
+        next = { ...data, inventory: { ...data.inventory, ...imported.inventory } };
+        changed = ['inventory'];
+      }
+      const saved = await commit(next, changed);
+      if (!saved && cloudMode) notify('Đã đọc file nhưng chưa đồng bộ được. Hãy kiểm tra kết nối Supabase.');
+      else if (!(taskId === 'wip' && count < imported.wip.length)) notify(`Đã nhập ${count} dòng vào tác vụ ${taskId}.`);
+    } catch (error) {
+      setTaskErrors((current) => ({ ...current, [taskId]: error.message || 'Không nhập được file.' }));
+    } finally {
+      setBusyTask('');
+    }
   };
 
-  const importOrders = async (file) => {
-    const imported = await importOrderFile(file);
-    const next = { ...data, orders: mergeRows(data.orders, imported, orderKey) };
-    const saved = await commit(next, ['order']);
-    notify(`Đã nạp ${imported.length} dòng đơn hàng từ ADIDAS/LƯU HÓA. Sheet BTP được bỏ qua.`);
-    if (!saved && cloudMode) notify('Đơn hàng đã đọc nhưng chưa đồng bộ. Hãy kiểm tra kết nối Supabase.');
-    setModal('');
+  const exportTask = async (taskId, template = false) => {
+    try {
+      let exportData = data;
+      if (template) exportData = emptyData();
+      const bytes = await createTaskWorkbook(taskId, exportData);
+      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = taskFilename(taskId);
+      link.click();
+      URL.revokeObjectURL(url);
+      notify(template ? 'Đã tải file mẫu cho tác vụ.' : 'Đã xuất dữ liệu tác vụ ra Excel.');
+    } catch (error) {
+      notify(error.message || 'Không tạo được file Excel.');
+    }
   };
 
   const saveMaterial = async (form) => {
@@ -198,6 +241,31 @@ function App() {
     await commit(next, ['bom']);
     setModal('');
     notify('Đã lưu định mức BOM.');
+  };
+
+  const saveNorm = async (form) => {
+    const material = data.materials.find((item) => Number(item.catalogNo) === Number(form.catalogNo));
+    const norm = {
+      catalogNo: Number(form.catalogNo),
+      materialCode: material?.materialCode || '',
+      materialName: material?.name || '',
+      productKey: productKey(form.model, form.color),
+      size: form.size.trim(),
+      process: form.process.trim(),
+      btpCode: form.btpCode.trim(),
+      btpName: form.btpName.trim(),
+      rate: Number(form.rate),
+      plannedQty: Number(form.plannedQty) || 0,
+      wipQty: Number(form.wipQty) || 0,
+    };
+    if (!norm.catalogNo || !form.model.trim() || !form.color.trim() || !norm.size || !(norm.rate > 0)) {
+      notify('Hãy nhập vật tư, mã hàng-màu, size và định mức lớn hơn 0.');
+      return;
+    }
+    const next = { ...data, norms: mergeRows(data.norms, [norm], normKey) };
+    await commit(next, ['norm']);
+    setModal('');
+    notify('Đã lưu định mức BTP theo size.');
   };
 
   const saveOrder = async (form) => {
@@ -276,7 +344,7 @@ function App() {
               {cloudMode ? (saving ? 'Đang lưu' : 'Dữ liệu dùng chung') : 'Chế độ thiết bị'}
             </span>
             {cloudMode && <button className="icon-button" title="Tải lại dữ liệu" onClick={refreshCloud}><RefreshCw size={17} /></button>}
-            <button className="button button-primary button-small" onClick={() => setModal('import')}><Upload size={15} /> Nhập Excel</button>
+            <button className="button button-primary button-small" onClick={() => setPage('data-entry')}><Upload size={15} /> Tác vụ nhập liệu</button>
             {cloudMode && <button className="icon-button" title="Đăng xuất" onClick={signOut}><LogOut size={17} /></button>}
           </div>
         </header>
@@ -286,14 +354,20 @@ function App() {
           {page === 'overview' && <Dashboard data={data} setPage={setPageSafe} />}
           {page === 'orders' && <OrdersPage data={data} onAdd={() => setModal('order')} onProgress={updateOrderProgress} />}
           {page === 'inventory' && <InventoryPage data={data} rows={currentRows} selectedPlant={selectedPlant} setPlant={setSelectedPlant} onUpdate={updateInventory} />}
-          {page === 'catalog' && <CatalogPage data={data} onAddMaterial={() => setModal('material')} onAddBom={() => setModal('bom')} />}
-          {page === 'norms' && <NormsPage data={data} />}
+          {page === 'catalog' && <CatalogPage data={data} tab={catalogTab} setTab={setCatalogTab} onAddMaterial={() => setModal('material')} onAddBom={() => setModal('bom')} />}
+          {page === 'norms' && <NormsPage data={data} onAdd={() => setModal('norm')} />}
+          {page === 'data-entry' && <DataTasksPage data={data} onImport={importTask} onExport={exportTask} busyTask={busyTask} taskErrors={taskErrors} onOpen={(taskId) => {
+            if (taskId === 'orders' || taskId === 'wip') setPageSafe('orders');
+            else if (taskId === 'materials' || taskId === 'bom') { setCatalogTab(taskId); setPageSafe('catalog'); }
+            else if (taskId === 'norms') { setPageSafe('norms'); setModal('norm'); }
+            else if (taskId.startsWith('inventory:')) { setSelectedPlant(taskId.slice('inventory:'.length)); setPageSafe('inventory'); }
+          }} />}
         </div>
       </main>
 
-      {modal === 'import' && <ImportModal onClose={() => setModal('')} onCatalog={importCatalog} onOrders={importOrders} />}
       {modal === 'material' && <MaterialModal onClose={() => setModal('')} onSave={saveMaterial} />}
       {modal === 'bom' && <BomModal materials={data.materials} onClose={() => setModal('')} onSave={saveBom} />}
+      {modal === 'norm' && <NormModal materials={data.materials} onClose={() => setModal('')} onSave={saveNorm} />}
       {modal === 'order' && <OrderModal onClose={() => setModal('')} onSave={saveOrder} />}
       {modal === 'setup' && <SetupModal onClose={() => setModal('')} />}
       {toast && <div className="toast"><Check size={16} />{toast}</div>}
@@ -414,6 +488,52 @@ function ReconcileLine({ label, value, icon }) {
   return <div className="reconcile-line"><span className={`reconcile-icon ${icon}`}>{icon === 'receipt' ? '↓' : icon === 'wip' ? '↗' : '◉'}</span><span>{label}</span><strong>{money(value, 1)}</strong></div>;
 }
 
+function DataTasksPage({ data, onImport, onExport, busyTask, taskErrors, onOpen }) {
+  const tasks = [
+    { id: 'orders', title: 'Kế hoạch đơn hàng', description: 'Nhập mã đơn, mã hàng-màu, nhà máy và số lượng kế hoạch.', source: 'DON HANG.xlsx · ADIDAS / LƯU HÓA', count: data.orders.length, unit: 'đơn', icon: Layers3, color: 'blue', action: 'Mở nhập đơn hàng' },
+    { id: 'wip', title: 'Tiến độ WIP', description: 'Cập nhật sản lượng theo từng đơn và từng nhà máy.', source: 'File riêng · TienDo_WIP', count: data.orders.length, unit: 'đơn có thể cập nhật', icon: Activity, color: 'teal', action: 'Mở nhập tiến độ' },
+    { id: 'materials', title: 'Danh mục vật tư', description: 'Quản lý một mã vật tư dùng cho một hoặc nhiều nhà máy.', source: 'Workbook · 1_Danh_Muc_Va_Ma_Tran_BOM', count: data.materials.length, unit: 'mã', icon: Boxes, color: 'green', action: 'Mở nhập vật tư' },
+    { id: 'bom', title: 'Định mức BOM', description: 'Nhập định mức theo từng vật tư và mã hàng-màu; không giới hạn số cột màu.', source: 'File riêng · Dinh_Muc_BOM (dạng danh sách)', count: data.bom.length, unit: 'dòng', icon: ArrowLeftRight, color: 'amber', action: 'Mở nhập BOM' },
+    ...PLANTS.map((plant) => ({
+      id: 'inventory:' + plant.id,
+      title: 'Lĩnh về & kiểm kê · ' + plant.name,
+      description: 'Nhập số lượng lĩnh về và kết quả đếm thực tế cho khu vực này.',
+      source: 'Workbook · ' + (plant.id === 'HOA_MAU' ? '2_Kho_Hoa_Mau' : plant.id === 'LAF' ? '3_Kho_Xuong_LAF' : '4_Kho_Xuong_LVF'),
+      count: data.materials.filter((material) => (material.plants || []).includes(plant.id)).length,
+      unit: 'mã vật tư',
+      icon: ClipboardCheck,
+      color: plant.color,
+      action: 'Mở nhập kiểm kê',
+    })),
+    { id: 'norms', title: 'Định mức BTP theo size · LAF', description: 'Nhập vật tư, mã hàng-màu, size, công đoạn, định mức, kế hoạch và WIP theo size.', source: 'Workbook · DM_BTP_Size_LAF', count: data.norms.length, unit: 'dòng', icon: Settings2, color: 'violet', action: 'Mở nhập định mức' },
+  ];
+
+  return <>
+    <div className="page-heading"><div><div className="eyebrow">TRUNG TÂM DỮ LIỆU <span>•</span> TÁCH RIÊNG THEO TỪNG TÁC VỤ</div><h1>Tác vụ nhập liệu</h1><p>Mỗi phần dữ liệu có file import, export và biểu mẫu riêng theo cấu trúc workbook.</p></div></div>
+    <div className="task-guidance"><FileSpreadsheet size={18} /><span><strong>Không phụ thuộc công thức Excel.</strong> Chỉ nhập các cột đầu vào. Nhu cầu BOM, tồn lý thuyết, chênh lệch và số còn lại do ứng dụng tự tính.</span></div>
+    <div className="task-grid">
+      {tasks.map((task) => {
+        const Icon = task.icon;
+        return <article className="task-card" key={task.id}>
+          <div className="task-card-top"><div className={`task-icon ${task.color}`}><Icon size={19} /></div><span className="task-count"><strong>{money(task.count)}</strong> {task.unit}</span></div>
+          <h2>{task.title}</h2>
+          <p className="task-description">{task.description}</p>
+          <div className="task-source"><FileSpreadsheet size={13} /><span>{task.source}</span></div>
+          <div className="task-actions">
+            <label className="button button-primary button-small upload-control"><Upload size={14} />{busyTask === task.id ? 'Đang nhập...' : 'Import file'}
+              <input type="file" accept=".xlsx,.xlsm" disabled={Boolean(busyTask)} onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(task.id, file); event.target.value = ''; }} />
+            </label>
+            <button className="button button-secondary button-small" onClick={() => onExport(task.id)}><ArrowDownToLine size={14} /> Export dữ liệu</button>
+            <button className="task-template-button" onClick={() => onExport(task.id, true)}>Tải mẫu trống</button>
+          </div>
+          {taskErrors[task.id] && <div className="task-error"><CircleAlert size={14} />{taskErrors[task.id]}</div>}
+          <button className="task-manual-button" onClick={() => onOpen(task.id)}>{task.action}<span>→</span></button>
+        </article>;
+      })}
+    </div>
+  </>;
+}
+
 function OrdersPage({ data, onAdd, onProgress }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('Tất cả');
@@ -481,8 +601,7 @@ function InventoryPage({ data, rows, selectedPlant, setPlant, onUpdate }) {
   </>;
 }
 
-function CatalogPage({ data, onAddMaterial, onAddBom }) {
-  const [tab, setTab] = useState('materials');
+function CatalogPage({ data, tab, setTab, onAddMaterial, onAddBom }) {
   const [query, setQuery] = useState('');
   const materials = data.materials.filter((row) => `${row.catalogNo} ${row.materialCode} ${row.name} ${row.colorScope}`.toLowerCase().includes(query.toLowerCase()));
   const bom = data.bom.filter((row) => {
@@ -499,14 +618,14 @@ function CatalogPage({ data, onAddMaterial, onAddBom }) {
   </>;
 }
 
-function NormsPage({ data }) {
+function NormsPage({ data, onAdd }) {
   const [query, setQuery] = useState('');
   const norms = data.norms.filter((row) => `${row.catalogNo} ${row.productKey} ${row.size} ${row.process} ${row.btpCode} ${row.btpName}`.toLowerCase().includes(query.toLowerCase()));
   return <>
-    <div className="page-heading"><div><div className="eyebrow">BẢNG PHỤ <span>•</span> NHÀ MÁY LAF</div><h1>Định mức BTP theo size</h1><p>Chi tiết vật tư, mã hàng-màu, size, công đoạn và định mức cho từng dòng bán thành phẩm.</p></div><span className="period-badge">LAF · SIZE / CÔNG ĐOẠN</span></div>
+    <div className="page-heading"><div><div className="eyebrow">BẢNG PHỤ <span>•</span> NHÀ MÁY LAF</div><h1>Định mức BTP theo size</h1><p>Chi tiết vật tư, mã hàng-màu, size, công đoạn và định mức cho từng dòng bán thành phẩm.</p></div><button className="button button-primary" onClick={onAdd}><Plus size={16} />Thêm định mức size</button></div>
     <div className="metric-strip"><MetricInline label="Dòng định mức" value={money(data.norms.length)} /><MetricInline label="Vật tư liên quan" value={money(new Set(data.norms.map((row) => row.catalogNo)).size)} /><MetricInline label="Mã hàng - màu" value={money(new Set(data.norms.map((row) => row.productKey)).size)} /><MetricInline label="Công đoạn" value={money(new Set(data.norms.map((row) => row.process).filter(Boolean)).size)} /></div>
     <section className="panel table-panel page-table-panel"><div className="table-toolbar"><div className="search-input"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm vật tư, mã hàng, size, công đoạn..." /></div><span className="helper-label">Từ sheet DM_BTP_Size_LAF</span></div>
-      {norms.length ? <div className="table-scroll"><table><thead><tr><th>STT DM</th><th>MÃ VẬT TƯ / TÊN</th><th>MÃ HÀNG - MÀU</th><th>SIZE</th><th>CÔNG ĐOẠN</th><th>MÃ BTP</th><th>TÊN BTP</th><th className="numeric">ĐỊNH MỨC / ĐÔI</th><th className="numeric">SL KẾ HOẠCH</th><th className="numeric">NHU CẦU</th></tr></thead><tbody>{norms.map((row, index) => { const material = data.materials.find((item) => Number(item.catalogNo) === Number(row.catalogNo)); return <tr key={`${normKey(row)}|${index}`}><td>{row.catalogNo}</td><td><strong>{material?.materialCode || row.materialCode || '—'}</strong><small>{material?.name || row.materialName || '—'}</small></td><td>{row.productKey}</td><td>{row.size || '—'}</td><td>{row.process || '—'}</td><td>{row.btpCode || '—'}</td><td>{row.btpName || '—'}</td><td className="numeric">{money(row.rate, 4)}</td><td className="numeric">{money(row.plannedQty)}</td><td className="numeric">{money(row.plannedNeed ?? row.rate * row.plannedQty, 2)}</td></tr>; })}</tbody></table></div> : <EmptyState title="Chưa có định mức size" text="Nhập file thống kê .xlsm/.xlsx. Sheet DM_BTP_Size_LAF sẽ được đọc riêng; sheet BTP trong DON HANG không được sử dụng." action="Nhập workbook" onAction={() => window.dispatchEvent(new CustomEvent('open-import'))} />}
+      {norms.length ? <div className="table-scroll"><table><thead><tr><th>STT DM</th><th>MÃ VẬT TƯ / TÊN</th><th>MÃ HÀNG - MÀU</th><th>SIZE</th><th>CÔNG ĐOẠN</th><th>MÃ BTP</th><th>TÊN BTP</th><th className="numeric">ĐỊNH MỨC / ĐÔI</th><th className="numeric">SL KẾ HOẠCH</th><th className="numeric">NHU CẦU</th></tr></thead><tbody>{norms.map((row, index) => { const material = data.materials.find((item) => Number(item.catalogNo) === Number(row.catalogNo)); return <tr key={`${normKey(row)}|${index}`}><td>{row.catalogNo}</td><td><strong>{material?.materialCode || row.materialCode || '—'}</strong><small>{material?.name || row.materialName || '—'}</small></td><td>{row.productKey}</td><td>{row.size || '—'}</td><td>{row.process || '—'}</td><td>{row.btpCode || '—'}</td><td>{row.btpName || '—'}</td><td className="numeric">{money(row.rate, 4)}</td><td className="numeric">{money(row.plannedQty)}</td><td className="numeric">{money(row.rate * row.plannedQty, 2)}</td></tr>; })}</tbody></table></div> : <EmptyState title="Chưa có định mức size" text="Nhập file thống kê .xlsm/.xlsx. Sheet DM_BTP_Size_LAF sẽ được đọc riêng; sheet BTP trong DON HANG không được sử dụng." action="Nhập workbook" onAction={() => window.dispatchEvent(new CustomEvent('open-import'))} />}
       <div className="table-footnote"><span>Không lấy sheet BTP trong DON HANG.xlsx.</span><span>{money(norms.length)} dòng</span></div>
     </section>
   </>;
@@ -532,25 +651,6 @@ function CloudAccessScreen({ error, onSignOut }) {
 
 function LoadingScreen({ label }) { return <div className="loading-screen"><div className="loader" /><strong>{label}</strong><span>Đang kết nối không gian dữ liệu</span></div>; }
 
-function ImportModal({ onClose, onCatalog, onOrders }) {
-  const [busy, setBusy] = useState('');
-  const [error, setError] = useState('');
-  const pick = async (kind, callback, event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setBusy(kind); setError('');
-    try { await callback(file); }
-    catch (issue) { setError(issue.message || 'Không nhập được file.'); }
-    finally { setBusy(''); event.target.value = ''; }
-  };
-  return <ModalShell title="Nhập dữ liệu từ Excel" subtitle="Chọn từng file nguồn. Mã ghép và định mức được tách thành các bản ghi để tìm kiếm nhanh." onClose={onClose}>
-    <div className="import-source-card"><div className="source-icon teal"><FileSpreadsheet size={20} /></div><div className="source-copy"><strong>Danh mục vật tư & ma trận BOM</strong><span>File kiểm kê .xlsm/.xlsx · nạp vật tư, BOM, kiểm kê và định mức size LAF.</span></div><label className="button button-secondary button-small upload-control"><Upload size={14} />{busy === 'catalog' ? 'Đang đọc...' : 'Chọn file'}<input type="file" accept=".xlsx,.xlsm" onChange={(event) => pick('catalog', onCatalog, event)} disabled={Boolean(busy)} /></label></div>
-    <div className="import-source-card"><div className="source-icon blue"><Layers3 size={20} /></div><div className="source-copy"><strong>DON HANG.xlsx</strong><span>Chỉ nhập sheet ADIDAS và LƯU HÓA. Sheet BTP được bỏ qua.</span></div><label className="button button-secondary button-small upload-control"><Upload size={14} />{busy === 'orders' ? 'Đang đọc...' : 'Chọn file'}<input type="file" accept=".xlsx" onChange={(event) => pick('orders', onOrders, event)} disabled={Boolean(busy)} /></label></div>
-    {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-    <div className="import-private-note"><ShieldCheck size={15} /> Workbook được đọc ngay trong trình duyệt. File gốc không được tải lên repo GitHub.</div>
-  </ModalShell>;
-}
-
 function MaterialModal({ onClose, onSave }) {
   const [plants, setPlants] = useState(['LAF']);
   const toggle = (id) => setPlants((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
@@ -567,6 +667,21 @@ function BomModal({ materials, onClose, onSave }) {
 function OrderModal({ onClose, onSave }) {
   const submit = (event) => { event.preventDefault(); onSave(Object.fromEntries(new FormData(event.currentTarget))); };
   return <ModalShell title="Thêm đơn hàng" subtitle="Nhập một dòng theo chỉ lệnh / mã hàng / màu sắc." onClose={onClose}><form className="form-grid" onSubmit={submit}><label>Mã đơn hàng / LSX *<input name="orderNo" required placeholder="VD: LSX-2609-001" /></label><label>Mã hàng *<input name="model" required /></label><label>Mã màu *<input name="color" required /></label><label>Tên màu<input name="colorName" /></label><label>Nhà máy chính<select name="plant" defaultValue="LAF"><option value="HOA_MAU">Hóa mẫu</option><option value="LAF">LAF</option><option value="LVF">LVF</option></select></label><label>Số lượng kế hoạch (đôi) *<input name="plannedQty" required type="number" min="1" /></label><div className="modal-actions field-span"><button type="button" className="button button-ghost" onClick={onClose}>Hủy</button><button type="submit" className="button button-primary"><Check size={15} /> Lưu đơn hàng</button></div></form></ModalShell>;
+}
+
+function NormModal({ materials, onClose, onSave }) {
+  const submit = (event) => { event.preventDefault(); onSave(Object.fromEntries(new FormData(event.currentTarget))); };
+  return <ModalShell title="Thêm định mức BTP theo size" subtitle="Mỗi dòng là một vật tư cho mã hàng-màu, size và công đoạn LAF." onClose={onClose}>
+    <form className="form-grid" onSubmit={submit}>
+      <label className="field-span">Vật tư *<select name="catalogNo" required defaultValue=""><option value="" disabled>Chọn vật tư trong danh mục</option>{materials.map((item) => <option key={item.catalogNo} value={item.catalogNo}>{item.catalogNo} · {item.materialCode} · {item.name}</option>)}</select></label>
+      <label>Mã hàng *<input name="model" required placeholder="VD: NVQ89" /></label><label>Mã màu *<input name="color" required placeholder="VD: LC1783" /></label>
+      <label>Size *<input name="size" required placeholder="VD: 7" /></label><label>Công đoạn LAF<input name="process" placeholder="VD: Lót / Tẩy" /></label>
+      <label>Mã BTP<input name="btpCode" /></label><label>Tên BTP<input name="btpName" /></label>
+      <label>Định mức / 1 đôi *<input name="rate" type="number" min="0.000001" step="any" required /></label><label>SL kế hoạch theo size<input name="plannedQty" type="number" min="0" step="any" defaultValue="0" /></label>
+      <label>SL WIP LAF theo size<input name="wipQty" type="number" min="0" step="any" defaultValue="0" /></label>
+      <div className="modal-actions field-span"><button type="button" className="button button-ghost" onClick={onClose}>Hủy</button><button className="button button-primary" type="submit"><Check size={15} />Lưu định mức</button></div>
+    </form>
+  </ModalShell>;
 }
 
 function SetupModal({ onClose }) {
