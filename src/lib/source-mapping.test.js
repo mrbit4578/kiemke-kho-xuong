@@ -21,7 +21,24 @@ test('TIEN-DO-SX-DONHANG source maps production order, released quantity, and ea
   assert.equal(imported.productionOrders[0].plannedQty, 600);
   assert.equal(imported.productionOrders[0].productionQty, 400);
   assert.deepEqual(imported.productionOrders[0].stageQuantities, { LAF_CUT: 300, LVF_SEW: 250, LVF_GO: 100, RECEIVED: 30, PACKED: 20, SHIPPED: 10 });
+  assert.deepEqual(imported.productionOrders[0].openStageQuantities, { LAF_CUT: 300, LVF_SEW: 350, LVF_GO: 500 });
   assert.equal(imported.productionOrders[0].plant, '');
+});
+
+test('production source maps duplicate stage headers and recalculates positive pending units from completed output', async () => {
+  const { default: ExcelJS } = await import('exceljs');
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('New');
+  sheet.addRow(['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 'Số lượng đã sản xuất', '', '', 'Số lượng đôi dở dang', '', '']);
+  sheet.addRow(['Số SO#/WI#', 'Số PO', 'Chỉ lệnh ĐH', 'Khách hàng', 'Mã hàng', 'Màu', 'Mã sản phẩm', 'SL đơn hàng', 'Số lượng lệnh sản xuất', 'Chặt\nNhóm vật tư : Nhà máy LAF - Hóa mẫu LAF', 'May\nNhóm vật tư : Nhà máy LVF - Hóa mẫu LVF', 'Gò\nNhóm vật tư : Nhà máy LVF - Hóa mẫu LVF', 'Chặt\nNhóm vật tư : Nhà máy LAF - Hóa mẫu LAF', 'May\nNhóm vật tư : Nhà máy LVF - Hóa mẫu LVF', 'Gò\nNhóm vật tư : Nhà máy LVF - Hóa mẫu LVF']);
+  sheet.addRow(['SO1', 'PO1', 'LSX1', 'Khách A', 'M1', 'BLACK', 'SKU1', 600, 600, 300, 250, 100, '', '', '']);
+  sheet.getCell('M3').value = { formula: 'J3-H3', result: -999 };
+  sheet.getCell('N3').value = { formula: 'K3-H3', result: -350 };
+  sheet.getCell('O3').value = { formula: 'L3-H3', result: -500 };
+
+  const imported = await importTaskWorkbook('production-orders', asFile(await workbook.xlsx.writeBuffer()));
+  assert.deepEqual(imported.productionOrders[0].openStageQuantities, { LAF_CUT: 300, LVF_SEW: 350, LVF_GO: 500 });
+  assert.equal(imported.productionOrders[0].sourceStageBalances.LAF_CUT, -999);
 });
 
 test('progress import preserves rows with PO/SO and product keys when the command column is blank', async () => {
@@ -79,6 +96,36 @@ test('DM-NPL-DH maps chemical quantities to the selected Hóa mẫu warehouse an
   assert.equal(summarizeTheoreticalRequirements(laf.rows)[0].quantity, 20);
 });
 
+test('Hóa mẫu LAF chemical demand follows the remaining LAF cutting quantity', () => {
+  const data = {
+    productionOrders: [{ orderNo: 'LSX-CUT', purchaseOrder: 'PO-CUT', model: 'M-CUT', color: 'BLUE', plannedQty: 600, productionQty: 600, stageQuantities: { LAF_CUT: 300 }, openStageQuantities: { LAF_CUT: 300 }, batchId: 'orders-v1' }],
+    chemicalNorms: [{ warehouseId: 'HOA_MAU_LAF', productionOrder: 'LSX-CUT', purchaseOrder: 'PO-CUT', model: 'M-CUT', color: 'BLUE', sourceOrderQty: 600, sourceQuantity: 120, materialCode: 'CHEM1', batchId: 'norms-v1' }],
+    importMeta: { 'production-orders': { batchId: 'orders-v1' }, 'chemical-norms:HOA_MAU_LAF': { batchId: 'norms-v1' } },
+    materials: [],
+    bom: [],
+  };
+  const rows = getTheoreticalRequirements(data, 'HOA_MAU_LAF').rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].basisQty, 300);
+  assert.equal(rows[0].basisType, 'Còn lại tại công đoạn Chặt');
+  assert.equal(rows[0].quantity, 60);
+});
+
+test('a unique exact command links source norms when the source product labels differ', () => {
+  const data = {
+    productionOrders: [{ orderNo: 'CMD-EXACT', purchaseOrder: 'PO-A', model: 'MODEL-CANONICAL', color: 'BLUE', plannedQty: 100, productionQty: 100, stageQuantities: { LAF_CUT: 40 }, batchId: 'orders-v1' }],
+    chemicalNorms: [{ warehouseId: 'HOA_MAU_LAF', productionOrder: 'CMD-EXACT', purchaseOrder: 'PO-OLD', model: 'MODEL-OLD', color: 'BLU', sourceOrderQty: 100, sourceQuantity: 20, materialCode: 'CHEM2', batchId: 'norms-v1' }],
+    importMeta: { 'production-orders': { batchId: 'orders-v1' }, 'chemical-norms:HOA_MAU_LAF': { batchId: 'norms-v1' } },
+    materials: [],
+    bom: [],
+  };
+  const rows = getTheoreticalRequirements(data, 'HOA_MAU_LAF').rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].orderNo, 'CMD-EXACT');
+  assert.equal(rows[0].model, 'MODEL-CANONICAL');
+  assert.equal(rows[0].quantity, 12);
+});
+
 test('a unique PO + model + color match resolves a blank command to the chemical command and calculates demand', () => {
   const order = { orderNo: '', purchaseOrder: 'JLO_01', salesOrder: 'SO-01', model: 'EXTRA WIDE CALF RAIN BOOTS', color: 'RASPBERRY', productionQty: 600, batchId: 'orders-v1' };
   const norm = { warehouseId: 'HOA_MAU_LAF', purchaseOrder: 'JLO_01', productionOrder: 'jileo2607-0004', model: 'EXTRA WIDE CALF RAIN BOOTS', color: 'RASPBERRY', sourceOrderQty: 600, sourceQuantity: 60, materialCode: '003370', materialName: 'BỘT KÉM OXIT', unit: 'KG', batchId: 'norms-v1' };
@@ -131,8 +178,8 @@ test('direct factory BOM routes by explicit plant and uses mapped operation quan
   };
   const rows = getTheoreticalRequirements(data, 'LAF').rows;
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].basisQty, 280);
-  assert.equal(rows[0].quantity, 140);
+  assert.equal(rows[0].basisQty, 380);
+  assert.equal(rows[0].quantity, 190);
   assert.equal(getTheoreticalRequirements(data, 'LVF').rows.length, 0);
 });
 
@@ -222,3 +269,4 @@ test('a shared material without a selected warehouse is flagged instead of dupli
   assert.equal(result.unmapped.length, 1);
   assert.match(result.unmapped[0].reason, /nhiều nhà máy/);
 });
+
