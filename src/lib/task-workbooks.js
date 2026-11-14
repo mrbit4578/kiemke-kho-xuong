@@ -84,6 +84,13 @@ function findColumn(columns, aliases) {
   return null;
 }
 
+function findStageColumns(columns, stageName) {
+  const prefix = compact(stageName);
+  return [...columns]
+    .filter(([, label]) => label.startsWith(prefix))
+    .map(([col]) => col);
+}
+
 function findExactColumn(columns, aliases) {
   const candidates = aliases.map(compact);
   for (const candidate of candidates) {
@@ -100,6 +107,14 @@ function cellText(sheet, row, col) {
 
 function cellNumber(sheet, row, col) {
   return col ? number(sheet.getCell(row, col).value) : 0;
+}
+
+function cellNumberOrNull(sheet, row, col) {
+  if (!col) return null;
+  const value = sheet.getCell(row, col).value;
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'object' && value.result === undefined) return null;
+  return number(value);
 }
 
 function getModelColor(value) {
@@ -376,6 +391,11 @@ function readProductionOrders(workbook) {
   }
   if (!selected) throw new Error('Không tìm thấy bảng tiến độ có Mã hàng, Màu và Số lượng lệnh sản xuất.');
   const { sheet, header } = selected;
+  const stageColumns = {
+    LAF_CUT: findStageColumns(header.columns, 'Chặt'),
+    LVF_SEW: findStageColumns(header.columns, 'May'),
+    LVF_GO: findStageColumns(header.columns, 'Gò'),
+  };
   const col = {
     so: findColumn(header.columns, ['Số SO#/WI#', 'Số SO', 'SO/WI']),
     purchaseOrder: findColumn(header.columns, ['Số PO', 'PO']),
@@ -387,9 +407,12 @@ function readProductionOrders(workbook) {
     orderQty: findColumn(header.columns, ['Số lượng đơn hàng', 'SL đơn hàng']),
     productionQty: findColumn(header.columns, ['Số lượng lệnh sản xuất', 'SL lệnh sản xuất']),
     dueDate: findExactColumn(header.columns, ['Ngày giao hàng']),
-    cut: findColumn(header.columns, ['Chặt']),
-    sew: findColumn(header.columns, ['May']),
-    assembly: findColumn(header.columns, ['Gò']),
+    cut: stageColumns.LAF_CUT[0],
+    cutOpen: stageColumns.LAF_CUT[1],
+    sew: stageColumns.LVF_SEW[0],
+    sewOpen: stageColumns.LVF_SEW[1],
+    assembly: stageColumns.LVF_GO[0],
+    assemblyOpen: stageColumns.LVF_GO[1],
     received: findColumn(header.columns, ['Nhập kho']),
     packed: findColumn(header.columns, ['Đóng thùng']),
     shipped: findColumn(header.columns, ['Giao hàng']),
@@ -405,6 +428,7 @@ function readProductionOrders(workbook) {
     const productCode = cellText(sheet, row, col.productCode);
     if ((!orderNo && !purchaseOrder && !salesOrder && !productCode) || !model || !color) continue;
     const productionQty = cellNumber(sheet, row, col.productionQty);
+    const plannedQty = cellNumber(sheet, row, col.orderQty);
     const stageQuantities = {
       LAF_CUT: cellNumber(sheet, row, col.cut),
       LVF_SEW: cellNumber(sheet, row, col.sew),
@@ -413,6 +437,16 @@ function readProductionOrders(workbook) {
       PACKED: cellNumber(sheet, row, col.packed),
       SHIPPED: cellNumber(sheet, row, col.shipped),
     };
+    const stageBaseQty = plannedQty > 0 ? plannedQty : productionQty;
+    const openStageQuantities = {};
+    const sourceStageBalances = {};
+    for (const [key, openCol] of Object.entries({ LAF_CUT: col.cutOpen, LVF_SEW: col.sewOpen, LVF_GO: col.assemblyOpen })) {
+      const balance = cellNumberOrNull(sheet, row, openCol);
+      sourceStageBalances[key] = balance;
+      // Recalculate from the source quantity and completed output; cached Excel formula
+      // results can be stale or missing for shared formulas.
+      openStageQuantities[key] = Math.max(0, stageBaseQty - stageQuantities[key]);
+    }
     const hasLaf = stageQuantities.LAF_CUT > 0;
     const hasLvf = stageQuantities.LVF_SEW > 0 || stageQuantities.LVF_GO > 0;
     const plant = hasLaf === hasLvf ? '' : hasLaf ? 'LAF' : 'LVF';
@@ -426,10 +460,12 @@ function readProductionOrders(workbook) {
       color,
       productCode,
       colorName: color,
-      plannedQty: cellNumber(sheet, row, col.orderQty),
+      plannedQty,
       productionQty,
       plant,
       stageQuantities,
+      openStageQuantities,
+      sourceStageBalances,
       progress: { HOA_MAU: 0, LAF: 0, LVF: 0 },
       dueDate: cellText(sheet, row, col.dueDate),
       status: cellText(sheet, row, col.status) || (productionQty > 0 ? 'Đang sản xuất' : 'Chờ sản xuất'),
@@ -537,6 +573,7 @@ function readChemicalNorms(workbook, warehouseId, sourceFile) {
     productionOrder: findExactColumn(header.columns, ['Chỉ lệnh ĐH']),
     sourceOrderQty: findColumn(header.columns, ['SL đơn hàng', 'Số lượng đơn hàng']),
     component: findExactColumn(header.columns, ['Loại']),
+    operation: findColumn(header.columns, ['Công đoạn sử dụng', 'Công đoạn', 'Công đoạn SX']),
     formulaName: findExactColumn(header.columns, ['Tên công thức']),
     batchWeight: findExactColumn(header.columns, ['Tổng trọng lượng']),
     materialGroup: findColumn(header.columns, ['Nhóm vừa', 'Nhóm vật tư']),
@@ -562,6 +599,7 @@ function readChemicalNorms(workbook, warehouseId, sourceFile) {
       productionOrder,
       sourceOrderQty: cellNumber(sheet, row, col.sourceOrderQty),
       component: cellText(sheet, row, col.component),
+      operation: cellText(sheet, row, col.operation),
       formulaName: cellText(sheet, row, col.formulaName),
       batchWeight: cellNumber(sheet, row, col.batchWeight),
       materialGroup: cellText(sheet, row, col.materialGroup),
@@ -809,3 +847,4 @@ export async function createTaskWorkbook(taskId, data, plantId) {
 export function taskFilename(taskId) {
   return 'Kho_Xuong_' + taskId.replace(/[:]/g, '_') + '.xlsx';
 }
+
