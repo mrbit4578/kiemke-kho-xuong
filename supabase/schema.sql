@@ -19,13 +19,19 @@ create table if not exists public.workspace_members (
 
 create table if not exists public.workspace_records (
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
-  entity_type text not null check (entity_type in ('material', 'bom', 'order', 'inventory', 'norm')),
+  entity_type text not null check (entity_type in ('material', 'bom', 'order', 'inventory', 'norm', 'production_order', 'product_mapping', 'chemical_norm', 'import_meta')),
   entity_key text not null,
   payload jsonb not null,
   updated_by uuid references auth.users(id),
   updated_at timestamptz not null default now(),
   primary key (workspace_id, entity_type, entity_key)
 );
+
+alter table public.workspace_records
+  drop constraint if exists workspace_records_entity_type_check;
+alter table public.workspace_records
+  add constraint workspace_records_entity_type_check
+  check (entity_type in ('material', 'bom', 'order', 'inventory', 'norm', 'production_order', 'product_mapping', 'chemical_norm', 'import_meta'));
 
 create index if not exists workspace_records_workspace_type_idx
   on public.workspace_records (workspace_id, entity_type);

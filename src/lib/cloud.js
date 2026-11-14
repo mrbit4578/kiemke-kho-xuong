@@ -1,6 +1,6 @@
-import { inventoryKey, orderKey } from './model.js';
+import { inventoryKey, orderKey, productMappingKey } from './model.js';
 
-const TYPES = ['material', 'bom', 'order', 'inventory', 'norm'];
+const TYPES = ['material', 'bom', 'order', 'inventory', 'norm', 'production_order', 'product_mapping', 'chemical_norm', 'import_meta'];
 
 export async function ensureWorkspace(client) {
   const { data: memberships, error } = await client
@@ -28,12 +28,16 @@ export async function loadWorkspaceRecords(client, workspaceId) {
     all.push(...(data || []));
     if (!data || data.length < 1000) break;
   }
-  const state = { materials: [], bom: [], orders: [], inventory: {}, norms: [] };
+  const state = { materials: [], bom: [], orders: [], productionOrders: [], productMappings: [], chemicalNorms: [], importMeta: {}, inventory: {}, norms: [] };
   for (const row of all) {
     if (row.entity_type === 'material') state.materials.push(row.payload);
     if (row.entity_type === 'bom') state.bom.push(row.payload);
     if (row.entity_type === 'order') state.orders.push(row.payload);
     if (row.entity_type === 'norm') state.norms.push(row.payload);
+    if (row.entity_type === 'production_order') state.productionOrders.push(row.payload);
+    if (row.entity_type === 'product_mapping') state.productMappings.push(row.payload);
+    if (row.entity_type === 'chemical_norm') state.chemicalNorms.push(row.payload);
+    if (row.entity_type === 'import_meta') state.importMeta[row.payload.taskId] = row.payload;
     if (row.entity_type === 'inventory') {
       const item = row.payload;
       state.inventory[inventoryKey(item.plant, item.catalogNo)] = item;
@@ -48,6 +52,10 @@ function keyFor(type, item) {
   if (type === 'order') return orderKey(item);
   if (type === 'inventory') return inventoryKey(item.plant, item.catalogNo);
   if (type === 'norm') return `${item.catalogNo}|${item.productKey}|${item.size}|${item.process}|${item.btpCode || ''}`;
+  if (type === 'production_order') return `${item.batchId || 'legacy'}|${item.orderNo}|${item.model}|${item.color}`;
+  if (type === 'product_mapping') return productMappingKey(item);
+  if (type === 'chemical_norm') return `${item.warehouseId}|${item.batchId || 'legacy'}|${item.sourceRow || crypto.randomUUID()}`;
+  if (type === 'import_meta') return item.taskId;
   return crypto.randomUUID();
 }
 
@@ -56,6 +64,10 @@ export async function saveWorkspaceRecords(client, workspaceId, userId, payload,
     if (!changedTypes.includes(type)) continue;
     let items = payload[type] || [];
     if (type === 'inventory') items = Object.values(payload.inventory || {});
+    if (type === 'production_order') items = payload.productionOrders || [];
+    if (type === 'product_mapping') items = payload.productMappings || [];
+    if (type === 'chemical_norm') items = payload.chemicalNorms || [];
+    if (type === 'import_meta') items = Object.values(payload.importMeta || {});
     if (!items.length) continue;
     const rows = items.map((item) => ({
       workspace_id: workspaceId,

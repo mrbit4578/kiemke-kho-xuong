@@ -4,12 +4,17 @@
 
 ## Dữ liệu
 
-- Menu **Tác vụ nhập liệu** tách riêng tám luồng: đơn hàng, WIP, danh mục vật tư, BOM, kiểm kê Hóa mẫu, kiểm kê LAF, kiểm kê LVF và định mức BTP theo size LAF. Mỗi luồng có Import, Export dữ liệu và Tải mẫu trống.
+- Menu **Tác vụ nhập liệu** tách riêng các luồng đơn hàng, tiến độ sản xuất, mapping mã hàng-màu, WIP, danh mục vật tư, BOM trực tiếp, định mức Hóa mẫu LAF/LVF, kiểm kê và định mức BTP theo size LAF. Từng nguồn đầu vào có Import, Export dữ liệu và Tải mẫu trống.
 - Có thể nạp từng phần từ workbook hiện tại: danh mục/BOM từ `1_Danh_Muc_Va_Ma_Tran_BOM`; tồn kho từ từng sheet `2_Kho_Hoa_Mau`, `3_Kho_Xuong_LAF`, `4_Kho_Xuong_LVF`; định mức từ `DM_BTP_Size_LAF`.
 - File `DON HANG.xlsx`: chỉ đọc sheet `ADIDAS` và `LƯU HÓA`; sheet `BTP` được bỏ qua. Đơn ADIDAS được gán LAF, đơn LƯU HÓA được gán Hóa mẫu.
+- Nguồn `TIEN-DO-SX-DONHANG.xlsx` được đọc riêng từ sheet `New`, giữ PO, chỉ lệnh, mã hàng-màu, SL đơn, SL phát lệnh và tiến độ Chặt/May/Gò/Nhập kho/Đóng thùng/Giao hàng.
+- Nguồn `DM-MATHANG-HOAMAU LAF-CANLUYEN.xlsx` được đọc từ `DM-NPL-DH`. Định mức/đôi = `Số lượng hóa chất ÷ SL đơn hàng`; nhu cầu theo lệnh = định mức/đôi × `Số lượng lệnh sản xuất`.
+- Màn hình **Nhu cầu lý thuyết** tách bốn kho: Hóa mẫu LAF, Hóa mẫu LVF, xưởng LAF, xưởng LVF. Hóa mẫu LVF không tự dùng định mức LAF làm thay thế. BOM trực tiếp cần xác định kho nhận; vật tư nhiều nhà máy nhưng chưa có kho nhận được đưa vào danh sách cần mapping thay vì nhân đôi số lượng.
+- Mã màu đơn hàng được ghép với mã màu BOM từ khóa màu của nguồn định mức Hóa mẫu. Dòng không ghép đủ chỉ lệnh + mã hàng + màu hoặc không có kho nhận sẽ được xuất riêng để rà soát.
+- Có thể bổ sung thủ công bảng **Mapping mã hàng - màu BOM** cho đơn hàng chưa có mã màu ở file định mức. Bảng hỗ trợ ghép theo cặp mã hàng/tên màu nguồn hoặc Mã sản phẩm nguồn.
 - File Export là `.xlsx` theo từng tác vụ. BOM được xuất dạng danh sách dọc, nên số mã hàng-màu không bị giới hạn bởi số cột mẫu. File chỉ chứa dữ liệu đầu vào; không ghi công thức Excel. Nhu cầu, WIP, tồn lý thuyết và chênh lệch được tính trong ứng dụng.
 - Repo không chứa workbook hoặc dữ liệu mẫu. Hãy dùng **Tác vụ nhập liệu** sau khi mở ứng dụng.
-- Chưa kết nối Supabase: dữ liệu lưu trong local storage của trình duyệt hiện tại, chưa dùng chung giữa máy tính/người dùng.
+- Chưa kết nối Supabase: dữ liệu lưu trong IndexedDB của trình duyệt hiện tại, chưa dùng chung giữa máy tính/người dùng. IndexedDB được dùng để lưu các nguồn định mức nhiều dòng.
 
 ## Chạy trên máy
 
