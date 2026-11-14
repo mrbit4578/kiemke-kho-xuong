@@ -28,7 +28,7 @@ export async function loadWorkspaceRecords(client, workspaceId) {
     all.push(...(data || []));
     if (!data || data.length < 1000) break;
   }
-  const state = { materials: [], bom: [], orders: [], productionOrders: [], productMappings: [], chemicalNorms: [], importMeta: {}, inventory: {}, norms: [] };
+  const state = { materials: [], bom: [], orders: [], productionOrders: [], productMappings: [], orderMappings: [], chemicalNorms: [], importMeta: {}, inventory: {}, norms: [] };
   for (const row of all) {
     if (row.entity_type === 'material') state.materials.push(row.payload);
     if (row.entity_type === 'bom') state.bom.push(row.payload);
@@ -37,7 +37,10 @@ export async function loadWorkspaceRecords(client, workspaceId) {
     if (row.entity_type === 'production_order') state.productionOrders.push(row.payload);
     if (row.entity_type === 'product_mapping') state.productMappings.push(row.payload);
     if (row.entity_type === 'chemical_norm') state.chemicalNorms.push(row.payload);
-    if (row.entity_type === 'import_meta') state.importMeta[row.payload.taskId] = row.payload;
+    if (row.entity_type === 'import_meta') {
+      state.importMeta[row.payload.taskId] = row.payload;
+      if (row.payload.taskId === 'order-mapping') state.orderMappings = row.payload.orderMappings || [];
+    }
     if (row.entity_type === 'inventory') {
       const item = row.payload;
       state.inventory[inventoryKey(item.plant, item.catalogNo)] = item;

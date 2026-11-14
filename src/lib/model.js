@@ -21,7 +21,11 @@ export const productMappingKey = (row) => normalizeJoinKey(row.sourceProductCode
   ? `CODE|${normalizeJoinKey(row.sourceProductCode)}`
   : `PAIR|${normalizeJoinKey(row.sourceModel)}|${normalizeJoinKey(row.sourceColor)}`;
 export const inventoryKey = (plant, catalogNo) => `${plant}|${catalogNo}`;
-export const orderKey = (order) => `${order.orderNo}|${order.model}|${order.color}`;
+export const orderKey = (order) => {
+  const command = normalizeJoinKey(order.orderNo);
+  const source = command || [order.purchaseOrder, order.salesOrder, order.productCode].map(normalizeJoinKey).join('|');
+  return `${source}|${normalizeJoinKey(order.model)}|${normalizeJoinKey(order.color)}`;
+};
 export const normalizeJoinKey = (value) => String(value ?? '')
   .replace(/\u00a0/g, ' ')
   .normalize('NFD')
@@ -30,6 +34,104 @@ export const normalizeJoinKey = (value) => String(value ?? '')
   .replace(/\s+/g, ' ')
   .trim()
   .toUpperCase();
+
+export const orderMappingKey = (row) => [
+  row.sourceOrderNo, row.sourcePurchaseOrder, row.sourceSalesOrder,
+  row.sourceModel, row.sourceColor, row.sourceProductCode,
+].map((value) => normalizeJoinKey(value)).join('|');
+
+function mappingMatchesOrder(order, mapping) {
+  if (!mapping.targetOrderNo || !mapping.sourceModel || !mapping.sourceColor) return false;
+  if (normalizeJoinKey(mapping.sourceModel) !== normalizeJoinKey(order.model)
+    || normalizeJoinKey(mapping.sourceColor) !== normalizeJoinKey(order.color)) return false;
+  const fields = [
+    ['sourceOrderNo', 'orderNo'],
+    ['sourcePurchaseOrder', 'purchaseOrder'],
+    ['sourceSalesOrder', 'salesOrder'],
+    ['sourceProductCode', 'productCode'],
+  ];
+  const hasIdentifier = fields.some(([source]) => normalizeJoinKey(mapping[source]));
+  return hasIdentifier && fields.every(([source, target]) => (
+    !normalizeJoinKey(mapping[source]) || normalizeJoinKey(mapping[source]) === normalizeJoinKey(order[target])
+  ));
+}
+
+const chemicalIndexCache = new WeakMap();
+
+function sourceProductKey(sourceId, row) {
+  return [sourceId, row.model, row.color].map(normalizeJoinKey).join('|');
+}
+
+function commandProductKey(command, row) {
+  return [command, row.model, row.color].map(normalizeJoinKey).join('|');
+}
+
+function chemicalCommandIndex(rows) {
+  if (chemicalIndexCache.has(rows)) return chemicalIndexCache.get(rows);
+  const bySourceProduct = new Map();
+  const byCommandProduct = new Set();
+  for (const row of rows || []) {
+    const command = normalizeJoinKey(row.productionOrder);
+    if (!command) continue;
+    byCommandProduct.add(commandProductKey(command, row));
+    for (const sourceId of [row.purchaseOrder, row.salesOrder].map(normalizeJoinKey).filter(Boolean)) {
+      const key = sourceProductKey(sourceId, row);
+      if (!bySourceProduct.has(key)) bySourceProduct.set(key, new Map());
+      bySourceProduct.get(key).set(command, String(row.productionOrder).trim());
+    }
+  }
+  const index = { bySourceProduct, byCommandProduct };
+  if (rows && typeof rows === 'object') chemicalIndexCache.set(rows, index);
+  return index;
+}
+
+function commandsForOrder(order, index) {
+  const commands = new Map();
+  for (const sourceId of [order.purchaseOrder, order.salesOrder].map(normalizeJoinKey).filter(Boolean)) {
+    for (const [normalized, command] of index.bySourceProduct.get(sourceProductKey(sourceId, order)) || []) commands.set(normalized, command);
+  }
+  return [...commands.values()];
+}
+
+function indexRowsBySourceProduct(rows) {
+  const index = new Map();
+  for (const row of rows) {
+    for (const sourceId of [row.purchaseOrder, row.salesOrder].map(normalizeJoinKey).filter(Boolean)) {
+      const key = sourceProductKey(sourceId, row);
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(row);
+    }
+  }
+  return index;
+}
+
+function sourceCandidates(index, row) {
+  const candidates = new Map();
+  for (const sourceId of [row.purchaseOrder, row.salesOrder].map(normalizeJoinKey).filter(Boolean)) {
+    for (const candidate of index.get(sourceProductKey(sourceId, row)) || []) candidates.set(candidate, candidate);
+  }
+  return [...candidates.values()];
+}
+
+/** Resolve a progress row to the canonical chemical production command without guessing on conflicts. */
+export function resolveOrderCommand(order, chemicalRows = [], orderMappings = []) {
+  const manual = (orderMappings || []).filter((mapping) => mappingMatchesOrder(order, mapping));
+  const manualTargets = [...new Set(manual.map((mapping) => String(mapping.targetOrderNo).trim()).filter(Boolean))];
+  if (manualTargets.length === 1) return { orderNo: manualTargets[0], resolution: 'manual', candidates: manualTargets };
+  if (manualTargets.length > 1) return { orderNo: '', resolution: 'ambiguous', candidates: manualTargets };
+
+  const index = chemicalCommandIndex(chemicalRows);
+  const sourceCommand = String(order.orderNo || '').trim();
+  if (sourceCommand && index.byCommandProduct.has(commandProductKey(sourceCommand, order))) {
+    return { orderNo: sourceCommand, resolution: 'source', candidates: [sourceCommand] };
+  }
+
+  const candidates = [...commandsForOrder(order, index)];
+  if (candidates.length === 1) return { orderNo: candidates[0], resolution: 'automatic', candidates };
+  if (candidates.length > 1) return { orderNo: '', resolution: 'ambiguous', candidates };
+  if (sourceCommand) return { orderNo: sourceCommand, resolution: 'source', candidates: [sourceCommand] };
+  return { orderNo: '', resolution: 'unmapped', candidates: [] };
+}
 
 export function getWarehouseName(id) {
   return WAREHOUSES.find((warehouse) => warehouse.id === id)?.name || id;
@@ -76,21 +178,55 @@ export function getTheoreticalRequirements(data, warehouseId) {
     ? activeRows(data.chemicalNorms, data.importMeta, taskId).filter((row) => row.warehouseId === warehouseId)
     : WAREHOUSES.filter((item) => item.kind === 'chemical')
       .flatMap((item) => activeRows(data.chemicalNorms, data.importMeta, 'chemical-norms:' + item.id));
+  const allChemicalRows = WAREHOUSES.filter((item) => item.kind === 'chemical')
+    .flatMap((item) => activeRows(data.chemicalNorms, data.importMeta, 'chemical-norms:' + item.id));
   const productionOrders = activeRows(data.productionOrders, data.importMeta, 'production-orders');
   const orders = productionOrders.length ? productionOrders : (data.orders || []);
-  const orderByJoinKey = new Map(orders.map((order) => [
-    [order.orderNo, order.model, order.color].map(normalizeJoinKey).join('|'), order,
-  ]));
+  const ordersByCommandProduct = new Map();
+  for (const order of orders) {
+    const key = commandProductKey(order.orderNo, order);
+    if (!ordersByCommandProduct.has(key)) ordersByCommandProduct.set(key, []);
+    ordersByCommandProduct.get(key).push(order);
+  }
+  const ordersBySourceProduct = indexRowsBySourceProduct(orders);
+  const automaticCommandIndex = chemicalCommandIndex(allChemicalRows);
   const result = [];
   const unmapped = [];
 
   if (warehouse.kind === 'chemical') {
     for (const norm of chemicalRows) {
-      const order = orderByJoinKey.get([norm.productionOrder, norm.model, norm.color].map(normalizeJoinKey).join('|'));
-      if (!order) {
-        unmapped.push({ ...norm, reason: 'Không ghép được chỉ lệnh, mã hàng và màu với tiến độ sản xuất.' });
+      let ambiguityReason = '';
+      let candidates = ordersByCommandProduct.get(commandProductKey(norm.productionOrder, norm)) || [];
+      let matchType = 'Chỉ lệnh nguồn';
+      if (!candidates.length && (data.orderMappings || []).length) {
+        const mappingResults = orders.map((order) => ({ order, result: resolveOrderCommand(order, [], data.orderMappings || []) }));
+        const conflictingMappings = mappingResults.filter(({ result }) => result.resolution === 'ambiguous');
+        candidates = mappingResults.filter(({ result }) => (
+          result.resolution === 'manual' && normalizeJoinKey(result.orderNo) === normalizeJoinKey(norm.productionOrder)
+        )).map(({ order }) => order);
+        matchType = 'Bảng mapping';
+        if (!candidates.length && conflictingMappings.length) {
+          ambiguityReason = 'Bảng Mapping_Chi_Lenh có nhiều chỉ lệnh đích cho cùng một khóa nguồn; cần sửa còn một chỉ lệnh.';
+        }
+      }
+      if (!candidates.length && !ambiguityReason) {
+        const potentialOrders = sourceCandidates(ordersBySourceProduct, norm);
+        const possibleCommands = new Set(potentialOrders.flatMap((order) => commandsForOrder(order, automaticCommandIndex).map(normalizeJoinKey)));
+        if (possibleCommands.size === 1 && possibleCommands.has(normalizeJoinKey(norm.productionOrder))) {
+          candidates = potentialOrders;
+        } else if (possibleCommands.size > 1) {
+          ambiguityReason = 'PO + mã hàng + màu khớp nhiều chỉ lệnh trong DM-NPL-DH; cần nhập bảng Mapping_Chi_Lenh.';
+        }
+        matchType = 'PO + mã hàng + màu';
+      }
+      if (candidates.length !== 1) {
+        const reason = ambiguityReason || (candidates.length > 1
+          ? `Có ${candidates.length} dòng tiến độ cùng khớp theo ${matchType}; bổ sung khóa hoặc mapping chỉ lệnh.`
+          : 'Không khớp được PO + mã hàng + màu với tiến độ; nhập bảng Mapping_Chi_Lenh để nối thủ công.');
+        unmapped.push({ ...norm, reason });
         continue;
       }
+      const order = candidates[0];
       const sourceQty = Number(norm.sourceOrderQty) || 0;
       const releasedQty = productionOrderQuantity(order);
       if (!(sourceQty > 0)) {
@@ -101,7 +237,7 @@ export function getTheoreticalRequirements(data, warehouseId) {
       result.push({
         warehouseId,
         sourceType: 'chemical',
-        orderNo: order.orderNo,
+        orderNo: order.orderNo || norm.productionOrder,
         purchaseOrder: order.purchaseOrder || norm.purchaseOrder || '',
         model: order.model,
         color: order.color,

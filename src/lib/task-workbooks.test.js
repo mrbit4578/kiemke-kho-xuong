@@ -119,7 +119,7 @@ test('inventory exports only source fields and imports the selected factory reco
 
 test('every exported task workbook contains values only and provides a blank template row', async () => {
   const { default: ExcelJS } = await import('exceljs');
-  for (const taskId of ['orders', 'production-orders', 'product-mapping', 'chemical-norms:HOA_MAU_LAF', 'chemical-norms:HOA_MAU_LVF', 'requirements:HOA_MAU_LAF', 'requirements:HOA_MAU_LVF', 'requirements:LAF', 'requirements:LVF', 'wip', 'materials', 'bom', 'inventory:HOA_MAU', 'inventory:LAF', 'inventory:LVF', 'norms']) {
+  for (const taskId of ['orders', 'production-orders', 'order-mapping', 'product-mapping', 'chemical-norms:HOA_MAU_LAF', 'chemical-norms:HOA_MAU_LVF', 'requirements:HOA_MAU_LAF', 'requirements:HOA_MAU_LVF', 'requirements:LAF', 'requirements:LVF', 'wip', 'materials', 'bom', 'inventory:HOA_MAU', 'inventory:LAF', 'inventory:LVF', 'norms']) {
     const bytes = await createTaskWorkbook(taskId, baseData());
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(Buffer.from(bytes));

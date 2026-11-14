@@ -1,4 +1,4 @@
-import { getInventoryRows, getPlantName, getTheoreticalRequirements, inventoryKey, orderKey, productKey, WAREHOUSES } from './model.js';
+import { getInventoryRows, getPlantName, getTheoreticalRequirements, inventoryKey, orderKey, orderMappingKey, productKey, resolveOrderCommand, WAREHOUSES } from './model.js';
 
 const PLANT_SHEETS = {
   HOA_MAU: ['2_Kho_Hoa_Mau', 'Kho_Hoa_Mau', 'Hoa_Mau'],
@@ -371,15 +371,15 @@ function readOrders(workbook) {
 function readProductionOrders(workbook) {
   let selected = null;
   for (const sheet of workbook.worksheets) {
-    const header = findHeader(sheet, [['Chỉ lệnh ĐH'], ['Mã hàng'], ['Màu'], ['Số lượng lệnh sản xuất']]);
+    const header = findHeader(sheet, [['Mã hàng'], ['Màu'], ['Số lượng lệnh sản xuất', 'SL lệnh sản xuất']]);
     if (header) { selected = { sheet, header }; break; }
   }
-  if (!selected) throw new Error('Không tìm thấy bảng tiến độ có Chỉ lệnh ĐH, Mã hàng, Màu và Số lượng lệnh sản xuất.');
+  if (!selected) throw new Error('Không tìm thấy bảng tiến độ có Mã hàng, Màu và Số lượng lệnh sản xuất.');
   const { sheet, header } = selected;
   const col = {
-    so: findExactColumn(header.columns, ['Số SO#/WI#']),
-    purchaseOrder: findExactColumn(header.columns, ['Số PO']),
-    orderNo: findColumn(header.columns, ['Chỉ lệnh ĐH']),
+    so: findColumn(header.columns, ['Số SO#/WI#', 'Số SO', 'SO/WI']),
+    purchaseOrder: findColumn(header.columns, ['Số PO', 'PO']),
+    orderNo: findColumn(header.columns, ['Chỉ lệnh ĐH', 'Số chỉ lệnh', 'Chỉ lệnh', 'Mã chỉ lệnh']),
     model: findExactColumn(header.columns, ['Mã hàng']),
     color: findExactColumn(header.columns, ['Màu', 'Màu sắc']),
     productCode: findExactColumn(header.columns, ['Mã sản phẩm']),
@@ -400,7 +400,10 @@ function readProductionOrders(workbook) {
     const orderNo = cellText(sheet, row, col.orderNo);
     const model = cellText(sheet, row, col.model);
     const color = cellText(sheet, row, col.color);
-    if (!orderNo || !model || !color) continue;
+    const purchaseOrder = cellText(sheet, row, col.purchaseOrder);
+    const salesOrder = cellText(sheet, row, col.so);
+    const productCode = cellText(sheet, row, col.productCode);
+    if ((!orderNo && !purchaseOrder && !salesOrder && !productCode) || !model || !color) continue;
     const productionQty = cellNumber(sheet, row, col.productionQty);
     const stageQuantities = {
       LAF_CUT: cellNumber(sheet, row, col.cut),
@@ -415,12 +418,13 @@ function readProductionOrders(workbook) {
     const plant = hasLaf === hasLvf ? '' : hasLaf ? 'LAF' : 'LVF';
     orders.push({
       orderNo,
-      purchaseOrder: cellText(sheet, row, col.purchaseOrder),
-      salesOrder: cellText(sheet, row, col.so),
+      sourceOrderNo: orderNo,
+      purchaseOrder,
+      salesOrder,
       customer: cellText(sheet, row, col.customer),
       model,
       color,
-      productCode: cellText(sheet, row, col.productCode),
+      productCode,
       colorName: color,
       plannedQty: cellNumber(sheet, row, col.orderQty),
       productionQty,
@@ -434,8 +438,56 @@ function readProductionOrders(workbook) {
       sourceRow: row,
     });
   }
-  if (!orders.length) throw new Error('Không tìm thấy dòng chỉ lệnh sản xuất hợp lệ trong workbook.');
+  if (!orders.length) throw new Error('Không tìm thấy dòng tiến độ có PO/SO, mã hàng và màu hợp lệ trong workbook.');
   return orders;
+}
+
+function readOrderMappings(workbook) {
+  let selected = null;
+  for (const sheet of workbook.worksheets) {
+    const header = findHeader(sheet, [['Mã hàng nguồn'], ['Màu nguồn'], ['Chỉ lệnh đích']]);
+    if (header) { selected = { sheet, header }; break; }
+  }
+  if (!selected) throw new Error('Bảng Mapping_Chi_Lenh cần các cột Mã hàng nguồn, Màu nguồn và Chỉ lệnh đích.');
+  const { sheet, header } = selected;
+  const col = {
+    sourceSalesOrder: findColumn(header.columns, ['Số SO/WI nguồn', 'Số SO nguồn', 'SO/WI nguồn']),
+    sourcePurchaseOrder: findColumn(header.columns, ['Số PO nguồn', 'PO nguồn']),
+    sourceOrderNo: findColumn(header.columns, ['Chỉ lệnh nguồn']),
+    sourceModel: findColumn(header.columns, ['Mã hàng nguồn']),
+    sourceColor: findColumn(header.columns, ['Màu nguồn']),
+    sourceProductCode: findColumn(header.columns, ['Mã sản phẩm nguồn']),
+    targetOrderNo: findColumn(header.columns, ['Chỉ lệnh đích', 'Chỉ lệnh Hóa mẫu', 'Chỉ lệnh chuẩn']),
+    note: findColumn(header.columns, ['Ghi chú']),
+  };
+  const rows = [];
+  for (let row = header.row + 1; row <= sheet.rowCount; row += 1) {
+    const mapping = {
+      sourceSalesOrder: cellText(sheet, row, col.sourceSalesOrder),
+      sourcePurchaseOrder: cellText(sheet, row, col.sourcePurchaseOrder),
+      sourceOrderNo: cellText(sheet, row, col.sourceOrderNo),
+      sourceModel: cellText(sheet, row, col.sourceModel),
+      sourceColor: cellText(sheet, row, col.sourceColor),
+      sourceProductCode: cellText(sheet, row, col.sourceProductCode),
+      targetOrderNo: cellText(sheet, row, col.targetOrderNo),
+      note: cellText(sheet, row, col.note),
+      sourceRow: row,
+    };
+    const hasSourceKey = mapping.sourceOrderNo || mapping.sourcePurchaseOrder || mapping.sourceSalesOrder || mapping.sourceProductCode;
+    if (!hasSourceKey || !mapping.sourceModel || !mapping.sourceColor || !mapping.targetOrderNo) continue;
+    rows.push(mapping);
+  }
+  if (!rows.length) throw new Error('Chưa có mapping hợp lệ. Hãy giữ khóa PO/SO + mã hàng + màu và điền Chỉ lệnh đích.');
+  const mappings = new Map();
+  for (const mapping of rows) {
+    const key = orderMappingKey(mapping);
+    const previous = mappings.get(key);
+    if (previous && normalize(previous.targetOrderNo) !== normalize(mapping.targetOrderNo)) {
+      throw new Error(`Khóa nguồn ở dòng ${mapping.sourceRow} có nhiều Chỉ lệnh đích. Hãy để lại một chỉ lệnh cho mỗi khóa.`);
+    }
+    mappings.set(key, mapping);
+  }
+  return [...mappings.values()];
 }
 
 function readProductMappings(workbook) {
@@ -570,6 +622,7 @@ export async function importTaskWorkbook(taskId, file) {
   const workbook = await loadWorkbook(file);
   if (taskId === 'orders') return { orders: readOrders(workbook) };
   if (taskId === 'production-orders') return { productionOrders: readProductionOrders(workbook) };
+  if (taskId === 'order-mapping') return { orderMappings: readOrderMappings(workbook) };
   if (taskId === 'product-mapping') return { productMappings: readProductMappings(workbook) };
   if (taskId.startsWith('chemical-norms:')) {
     const warehouseId = taskId.slice('chemical-norms:'.length);
@@ -671,6 +724,24 @@ export async function createTaskWorkbook(taskId, data, plantId) {
     const orders = currentImportedRows(data.productionOrders, data.importMeta, 'production-orders');
     const rows = orders.map((order) => [order.salesOrder || '', order.purchaseOrder || '', order.orderNo, order.customer || '', order.model, order.color, order.productCode || '', order.plannedQty || 0, order.productionQty || 0, order.stageQuantities?.LAF_CUT || 0, order.stageQuantities?.LVF_SEW || 0, order.stageQuantities?.LVF_GO || 0, order.stageQuantities?.RECEIVED || 0, order.stageQuantities?.PACKED || 0, order.stageQuantities?.SHIPPED || 0, order.dueDate || '', order.status || '']);
     addTable(sheet, headers, rows, 5, 'TIẾN ĐỘ ĐƠN HÀNG SẢN XUẤT', 'Khóa nối là Chỉ lệnh ĐH + Mã hàng + Màu. Số lượng lệnh sản xuất là cơ sở tính nhu cầu hiện hành.');
+  } else if (taskId === 'order-mapping') {
+    const sheet = workbook.addWorksheet('Mapping_Chi_Lenh');
+    const headers = ['Số SO/WI nguồn', 'Số PO nguồn', 'Chỉ lệnh nguồn', 'Mã hàng nguồn', 'Màu nguồn', 'Mã sản phẩm nguồn', 'Chỉ lệnh đích', 'Trạng thái gợi ý', 'Các chỉ lệnh ứng viên', 'Ghi chú'];
+    const orders = currentImportedRows(data.productionOrders, data.importMeta, 'production-orders');
+    const sourceOrders = orders.length ? orders : (data.orders || []);
+    const mappings = currentImportedRows(data.orderMappings, data.importMeta, 'order-mapping');
+    const chemicalRows = WAREHOUSES.filter((item) => item.kind === 'chemical')
+      .flatMap((item) => currentImportedRows(data.chemicalNorms, data.importMeta, 'chemical-norms:' + item.id));
+    const rows = sourceOrders.map((order) => {
+      const resolved = resolveOrderCommand(order, chemicalRows, mappings);
+      const status = resolved.resolution === 'manual' ? 'Đã mapping thủ công'
+        : resolved.resolution === 'automatic' ? 'Tự ghép duy nhất theo PO + mã hàng + màu'
+          : resolved.resolution === 'ambiguous' ? 'Nhiều chỉ lệnh; cần rà soát'
+            : resolved.resolution === 'source' ? 'Có chỉ lệnh nguồn'
+              : 'Chưa tìm thấy; điền tay';
+      return [order.salesOrder || '', order.purchaseOrder || '', order.sourceOrderNo || order.orderNo || '', order.model || '', order.color || '', order.productCode || '', resolved.orderNo || '', status, resolved.candidates.join(' · '), ''];
+    });
+    addTable(sheet, headers, rows, 5, 'BẢNG PHỤ MAPPING CHỈ LỆNH', 'Đối chiếu PO/SO + mã hàng + màu với DM-NPL-DH. Chỉ tự ghép khi tìm được duy nhất một chỉ lệnh; trường hợp còn lại hãy điền Chỉ lệnh đích rồi import lại.');
   } else if (taskId === 'product-mapping') {
     const sheet = workbook.addWorksheet('Mapping_Ma_Hang_Mau');
     const headers = ['Mã sản phẩm nguồn', 'Mã hàng nguồn', 'Tên màu nguồn', 'Mã hàng BOM', 'Mã màu BOM', 'Ghi chú', 'Nguồn mapping'];

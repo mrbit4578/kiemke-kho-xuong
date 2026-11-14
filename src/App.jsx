@@ -5,13 +5,13 @@ import {
   Gauge, Layers3, LogOut, Menu, Package, Plus, RefreshCw, Search, Settings2,
   ShieldCheck, Upload, X,
 } from 'lucide-react';
-import { PLANTS, WAREHOUSES, getInventoryRows, getPlantName, getPlantSummary, getTheoreticalRequirements, getWarehouseName, summarizeTheoreticalRequirements, inventoryKey, mergeWipProgress, money, orderKey, productKey, productMappingKey, statusTone } from './lib/model.js';
+import { PLANTS, WAREHOUSES, getInventoryRows, getPlantName, getPlantSummary, getTheoreticalRequirements, getWarehouseName, summarizeTheoreticalRequirements, inventoryKey, mergeWipProgress, money, orderKey, productKey, productMappingKey, resolveOrderCommand, statusTone } from './lib/model.js';
 import { createTaskWorkbook, importTaskWorkbook, taskFilename } from './lib/task-workbooks.js';
 import { loadLocalState, saveLocalState } from './lib/local-db.js';
 import { supabase, cloudMode } from './lib/supabase.js';
 import { ensureWorkspace, loadWorkspaceRecords, saveWorkspaceRecords } from './lib/cloud.js';
 
-const emptyData = () => ({ materials: [], bom: [], orders: [], productionOrders: [], productMappings: [], chemicalNorms: [], importMeta: {}, inventory: {}, norms: [] });
+const emptyData = () => ({ materials: [], bom: [], orders: [], productionOrders: [], productMappings: [], orderMappings: [], chemicalNorms: [], importMeta: {}, inventory: {}, norms: [] });
 const navItems = [
   { id: 'overview', label: 'Tổng quan', icon: Gauge },
   { id: 'orders', label: 'Đơn hàng', icon: Layers3 },
@@ -42,6 +42,18 @@ function currentOrderRows(data) {
   if (!productionOrders.length) return data.orders || [];
   const keys = new Set(productionOrders.map(orderKey));
   return [...productionOrders, ...(data.orders || []).filter((order) => !keys.has(orderKey(order)))];
+}
+
+function orderResolutionContext(data) {
+  return {
+    chemicalRows: WAREHOUSES.filter((item) => item.kind === 'chemical')
+      .flatMap((item) => currentImportedRows(data.chemicalNorms, data.importMeta, 'chemical-norms:' + item.id)),
+    mappings: currentImportedRows(data.orderMappings, data.importMeta, 'order-mapping'),
+  };
+}
+
+function resolvedOrderNo(order, context) {
+  return resolveOrderCommand(order, context.chemicalRows, context.mappings).orderNo;
 }
 
 function App() {
@@ -197,6 +209,16 @@ function App() {
         const importMeta = { ...data.importMeta, [taskId]: { taskId, batchId, sourceFile: file.name, importedAt: new Date().toISOString(), rowCount: count } };
         next = { ...data, productionOrders, importMeta };
         changed = ['production_order', 'import_meta'];
+      } else if (taskId === 'order-mapping') {
+        const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const orderMappings = imported.orderMappings.map((mapping) => ({ ...mapping, batchId }));
+        count = orderMappings.length;
+        const importMeta = {
+          ...data.importMeta,
+          [taskId]: { taskId, batchId, sourceFile: file.name, importedAt: new Date().toISOString(), rowCount: count, orderMappings },
+        };
+        next = { ...data, orderMappings, importMeta };
+        changed = ['import_meta'];
       } else if (taskId === 'product-mapping') {
         count = imported.productMappings.length;
         const manualMappings = imported.productMappings.map((row) => ({ ...row, sourceType: 'manual' }));
@@ -401,6 +423,7 @@ function App() {
           {page === 'norms' && <NormsPage data={data} onAdd={() => setModal('norm')} />}
           {page === 'data-entry' && <DataTasksPage data={data} onImport={importTask} onExport={exportTask} busyTask={busyTask} taskErrors={taskErrors} onOpen={(taskId) => {
             if (taskId === 'orders' || taskId === 'wip' || taskId === 'production-orders') setPageSafe('orders');
+            else if (taskId === 'order-mapping') setPageSafe('orders');
             else if (taskId === 'product-mapping') { setSelectedWarehouse('LAF'); setPageSafe('requirements'); }
             else if (taskId === 'materials' || taskId === 'bom') { setCatalogTab(taskId); setPageSafe('catalog'); }
             else if (taskId === 'norms') { setPageSafe('norms'); setModal('norm'); }
@@ -454,6 +477,7 @@ function Sidebar({ page, setPage, mobileOpen, onClose }) {
 
 function Dashboard({ data, setPage }) {
   const orders = currentOrderRows(data);
+  const orderContext = useMemo(() => orderResolutionContext(data), [data.chemicalNorms, data.orderMappings, data.importMeta]);
   const summaries = PLANTS.map((plant) => getPlantSummary(data, plant.id));
   const allSummary = summaries.reduce((acc, item) => {
     for (const key of ['count', 'active', 'enough', 'surplus', 'shortage', 'received', 'wip', 'need', 'actual', 'variance']) acc[key] += item[key];
@@ -514,7 +538,7 @@ function Dashboard({ data, setPage }) {
             const done = Object.values(order.progress || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
             const production = order.productionQty !== undefined ? Number(order.productionQty) || 0 : done;
             const percent = order.plannedQty ? Math.min(100, (production / order.plannedQty) * 100) : 0;
-            return <tr key={orderKey(order)}><td><strong>{order.orderNo}</strong></td><td><span className="product-code">{order.model}</span><small>{order.color} · {order.colorName || 'Chưa ghi tên màu'}</small></td><td className="numeric">{money(order.plannedQty)}</td><td><div className="progress-cell"><div className="progress-track"><i style={{ width: `${percent}%` }} /></div><span>{Math.round(percent)}%</span></div></td><td><StatusBadge status={production > 0 ? 'Đang sản xuất' : order.status || 'Chờ sản xuất'} /></td></tr>;
+            return <tr key={orderKey(order)}><td><strong>{resolvedOrderNo(order, orderContext) || 'Chưa ghép chỉ lệnh'}</strong></td><td><span className="product-code">{order.model}</span><small>{order.color} · {order.colorName || 'Chưa ghi tên màu'}</small></td><td className="numeric">{money(order.plannedQty)}</td><td><div className="progress-cell"><div className="progress-track"><i style={{ width: `${percent}%` }} /></div><span>{Math.round(percent)}%</span></div></td><td><StatusBadge status={production > 0 ? 'Đang sản xuất' : order.status || 'Chờ sản xuất'} /></td></tr>;
           })}</tbody></table></div> : <EmptyState title="Chưa có đơn hàng" text="Nhập file DON HANG.xlsx hoặc thêm đơn thủ công." action="Nhập đơn hàng" onAction={() => setPage('orders')} />}
         </section>
         <section className="panel alerts-panel">
@@ -547,7 +571,8 @@ function DataTasksPage({ data, onImport, onExport, busyTask, taskErrors, onOpen 
   };
   const tasks = [
     { id: 'orders', title: 'Kế hoạch đơn hàng', description: 'Nhập mã đơn, mã hàng-màu, nhà máy và số lượng kế hoạch.', source: 'DON HANG.xlsx · ADIDAS / LƯU HÓA', count: data.orders.length, unit: 'đơn', icon: Layers3, color: 'blue', action: 'Mở nhập đơn hàng' },
-    { id: 'production-orders', title: 'Tiến độ & lệnh sản xuất', description: 'Nhập khóa chỉ lệnh, mã hàng-màu, số lượng đã phát lệnh và sản lượng theo từng công đoạn.', source: 'TIEN-DO-SX-DONHANG.xlsx · sheet New', count: currentProductionOrders.length, unit: 'chỉ lệnh', icon: Activity, color: 'teal', action: 'Mở tiến độ sản xuất' },
+    { id: 'production-orders', title: 'Tiến độ & lệnh sản xuất', description: 'Nhập PO/SO, mã hàng-màu và số lượng. Dòng thiếu chỉ lệnh vẫn được giữ để đối chiếu.', source: 'TIEN-DO-SX-DONHANG.xlsx · sheet New', count: currentProductionOrders.length, unit: 'dòng tiến độ', icon: Activity, color: 'teal', action: 'Mở tiến độ sản xuất' },
+    { id: 'order-mapping', title: 'Bảng phụ mapping chỉ lệnh', description: 'Tự dò chỉ lệnh từ DM-NPL-DH theo PO + mã hàng + màu; chỉ tự ghép khi có đúng một kết quả.', source: 'Bảng phụ · Mapping_Chi_Lenh', count: data.orderMappings.length, unit: 'mapping đã nhập', icon: ArrowLeftRight, color: 'amber', action: 'Rà soát đơn hàng' },
     { id: 'product-mapping', title: 'Mapping mã hàng - màu BOM', description: 'Nối tên mã hàng/màu ở tiến độ với mã hàng và mã màu nội bộ trong BOM; dùng cho đơn chưa có mã màu từ định mức Hóa mẫu.', source: 'File riêng · Mapping_Ma_Hang_Mau', count: data.productMappings.length, unit: 'mapping', icon: ArrowLeftRight, color: 'amber', action: 'Mở nhu cầu theo kho' },
     { id: 'wip', title: 'Tiến độ WIP', description: 'Cập nhật sản lượng theo từng đơn và từng nhà máy.', source: 'File riêng · TienDo_WIP', count: data.orders.length, unit: 'đơn có thể cập nhật', icon: Activity, color: 'teal', action: 'Mở nhập tiến độ' },
     { id: 'materials', title: 'Danh mục vật tư', description: 'Quản lý một mã vật tư dùng cho một hoặc nhiều nhà máy.', source: 'Workbook · 1_Danh_Muc_Va_Ma_Tran_BOM', count: data.materials.length, unit: 'mã', icon: Boxes, color: 'green', action: 'Mở nhập vật tư' },
@@ -607,6 +632,7 @@ function OrdersPage({ data, onAdd, onProgress }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('Tất cả');
   const allOrders = currentOrderRows(data);
+  const orderContext = useMemo(() => orderResolutionContext(data), [data.chemicalNorms, data.orderMappings, data.importMeta]);
   const hasSourceProgress = allOrders.some((order) => order.stageQuantities);
   const orders = allOrders.filter((order) => {
     const q = query.toLowerCase();
@@ -617,13 +643,13 @@ function OrdersPage({ data, onAdd, onProgress }) {
   const plannedTotal = allOrders.reduce((sum, item) => sum + (Number(item.plannedQty) || 0), 0);
   const releasedTotal = allOrders.reduce((sum, item) => sum + (Number(item.productionQty ?? item.plannedQty) || 0), 0);
   return <>
-    <div className="page-heading"><div><div className="eyebrow">BẢNG A <span>•</span> TIẾN ĐỘ THEO MÃ HÀNG & MÀU SẮC</div><h1>Đơn hàng sản xuất</h1><p>Mỗi dòng là một chỉ lệnh và khóa mã hàng-màu; lệnh sản xuất cùng tiến độ từng công đoạn được giữ theo nguồn.</p></div><button className="button button-primary" onClick={onAdd}><Plus size={16} /> Thêm đơn hàng</button></div>
+    <div className="page-heading"><div><div className="eyebrow">BẢNG A <span>•</span> TIẾN ĐỘ THEO MÃ HÀNG & MÀU SẮC</div><h1>Đơn hàng sản xuất</h1><p>Giữ nguyên PO/SO và tự hiển thị chỉ lệnh đã ghép theo PO + mã hàng + màu; dòng chưa duy nhất sẽ hiện trạng thái chưa ghép.</p></div><button className="button button-primary" onClick={onAdd}><Plus size={16} /> Thêm đơn hàng</button></div>
     <div className="metric-strip"><MetricInline label="TỔNG CHỈ LỆNH" value={money(allOrders.length)} /><MetricInline label="SL ĐƠN HÀNG" value={money(plannedTotal)} /><MetricInline label="SL ĐÃ PHÁT LỆNH SX" value={money(releasedTotal)} /><MetricInline label="MÃ HÀNG - MÀU" value={money(new Set(allOrders.map((order) => productKey(order.model, order.color))).size)} /></div>
     <section className="panel table-panel page-table-panel"><div className="table-toolbar"><div className="search-input"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm mã đơn, mã hàng, màu..." /></div><div className="toolbar-right"><div className="filter-pills">{['Tất cả', 'Đang chạy', 'Chờ sản xuất'].map((label) => <button key={label} className={filter === label ? 'selected' : ''} onClick={() => setFilter(label)}>{label}</button>)}</div><button className="icon-button"><Filter size={17} /></button></div></div>
-      {orders.length ? <div className="table-scroll"><table className="orders-table">{hasSourceProgress ? <><thead><tr><th>CHỈ LỆNH / PO</th><th>MÃ HÀNG & MÀU</th><th>KHÁCH HÀNG</th><th className="numeric">SL ĐƠN</th><th className="numeric">SL LỆNH SX</th><th className="numeric">CHẶT · LAF/HM</th><th className="numeric">MAY · LVF/HM</th><th className="numeric">GÒ · LVF/HM</th><th className="numeric">NHẬP KHO</th><th className="numeric">GIAO HÀNG</th><th>TRẠNG THÁI</th></tr></thead><tbody>{orders.map((order) => <tr key={orderKey(order)}><td><strong>{order.orderNo}</strong><small>{order.purchaseOrder || order.sourceSheet || '—'}</small></td><td><span className="product-code">{order.model}</span><small>{order.color}</small></td><td>{order.customer || '—'}</td><td className="numeric">{money(order.plannedQty)}</td><td className="numeric strong-cell">{money(order.productionQty)}</td><td className="numeric">{money(order.stageQuantities?.LAF_CUT || 0)}</td><td className="numeric">{money(order.stageQuantities?.LVF_SEW || 0)}</td><td className="numeric">{money(order.stageQuantities?.LVF_GO || 0)}</td><td className="numeric">{money(order.stageQuantities?.RECEIVED || 0)}</td><td className="numeric">{money(order.stageQuantities?.SHIPPED || 0)}</td><td><StatusBadge status={order.productionQty > 0 ? 'Đang sản xuất' : order.status || 'Chờ sản xuất'} /></td></tr>)}</tbody></> : <><thead><tr><th>CHỈ LỆNH / PO</th><th>MÃ HÀNG & MÀU SẮC</th><th>NHÀ MÁY</th><th className="numeric">SL KẾ HOẠCH</th>{PLANTS.map((plant) => <th className="numeric" key={plant.id}>WIP {plant.short}</th>)}<th className="numeric">CÒN LẠI</th><th>TRẠNG THÁI</th></tr></thead><tbody>{orders.map((order) => {
+      {orders.length ? <div className="table-scroll"><table className="orders-table">{hasSourceProgress ? <><thead><tr><th>CHỈ LỆNH / PO</th><th>MÃ HÀNG & MÀU</th><th>KHÁCH HÀNG</th><th className="numeric">SL ĐƠN</th><th className="numeric">SL LỆNH SX</th><th className="numeric">CHẶT · LAF/HM</th><th className="numeric">MAY · LVF/HM</th><th className="numeric">GÒ · LVF/HM</th><th className="numeric">NHẬP KHO</th><th className="numeric">GIAO HÀNG</th><th>TRẠNG THÁI</th></tr></thead><tbody>{orders.map((order) => <tr key={orderKey(order)}><td><strong>{resolvedOrderNo(order, orderContext) || 'Chưa ghép chỉ lệnh'}</strong><small>{order.purchaseOrder || order.sourceSheet || '—'}</small></td><td><span className="product-code">{order.model}</span><small>{order.color}</small></td><td>{order.customer || '—'}</td><td className="numeric">{money(order.plannedQty)}</td><td className="numeric strong-cell">{money(order.productionQty)}</td><td className="numeric">{money(order.stageQuantities?.LAF_CUT || 0)}</td><td className="numeric">{money(order.stageQuantities?.LVF_SEW || 0)}</td><td className="numeric">{money(order.stageQuantities?.LVF_GO || 0)}</td><td className="numeric">{money(order.stageQuantities?.RECEIVED || 0)}</td><td className="numeric">{money(order.stageQuantities?.SHIPPED || 0)}</td><td><StatusBadge status={order.productionQty > 0 ? 'Đang sản xuất' : order.status || 'Chờ sản xuất'} /></td></tr>)}</tbody></> : <><thead><tr><th>CHỈ LỆNH / PO</th><th>MÃ HÀNG & MÀU SẮC</th><th>NHÀ MÁY</th><th className="numeric">SL KẾ HOẠCH</th>{PLANTS.map((plant) => <th className="numeric" key={plant.id}>WIP {plant.short}</th>)}<th className="numeric">CÒN LẠI</th><th>TRẠNG THÁI</th></tr></thead><tbody>{orders.map((order) => {
         const done = Object.values(order.progress || {}).reduce((sum, value) => sum + (Number(value) || 0), 0);
         const remaining = Math.max(0, (Number(order.plannedQty) || 0) - done);
-        return <tr key={orderKey(order)}><td><strong>{order.orderNo}</strong><small>{order.sourceSheet || 'Nhập trực tiếp'}</small></td><td><span className="product-code">{order.model}</span><small>{order.color} · {order.colorName || '—'}</small></td><td>{order.plant ? <PlantTag plantId={order.plant} /> : '—'}</td><td className="numeric">{money(order.plannedQty)}</td>{PLANTS.map((plant) => <td className="numeric" key={plant.id}><NumberInput className="cell-input numeric-input" value={order.progress?.[plant.id] ?? 0} onSave={(value) => onProgress(order, plant.id, value)} /></td>)}<td className="numeric strong-cell">{money(remaining)}</td><td><StatusBadge status={done ? 'Đang sản xuất' : order.status || 'Chờ sản xuất'} /></td></tr>;
+        return <tr key={orderKey(order)}><td><strong>{resolvedOrderNo(order, orderContext) || 'Chưa ghép chỉ lệnh'}</strong><small>{order.purchaseOrder || order.sourceSheet || 'Nhập trực tiếp'}</small></td><td><span className="product-code">{order.model}</span><small>{order.color} · {order.colorName || '—'}</small></td><td>{order.plant ? <PlantTag plantId={order.plant} /> : '—'}</td><td className="numeric">{money(order.plannedQty)}</td>{PLANTS.map((plant) => <td className="numeric" key={plant.id}><NumberInput className="cell-input numeric-input" value={order.progress?.[plant.id] ?? 0} onSave={(value) => onProgress(order, plant.id, value)} /></td>)}<td className="numeric strong-cell">{money(remaining)}</td><td><StatusBadge status={done ? 'Đang sản xuất' : order.status || 'Chờ sản xuất'} /></td></tr>;
       })}</tbody></>}</table></div> : <EmptyState title="Chưa có đơn hàng phù hợp" text="Nhập TIEN-DO-SX-DONHANG hoặc tạo đơn hàng mới để bắt đầu theo dõi." action="Thêm đơn hàng" onAction={onAdd} />}
       <div className="table-footnote"><span>{hasSourceProgress ? 'Tiến độ U:Z được giữ riêng từng công đoạn, không cộng dồn giữa các nhà máy.' : 'Tiến độ WIP theo từng nhà máy'}</span><span>{money(orders.length)} dòng hiển thị</span></div>
     </section>
