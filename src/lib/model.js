@@ -149,6 +149,11 @@ function productionOrderQuantity(order) {
   return Number(order.plannedQty) || 0;
 }
 
+function orderBasisQuantity(order) {
+  const plannedQty = Number(order.plannedQty) || 0;
+  return plannedQty > 0 ? plannedQty : productionOrderQuantity(order);
+}
+
 function warehouseFromPlant(plant) {
   if (plant === 'LAF' || plant === 'LVF') return plant;
   if (plant === 'HOA_MAU_LAF' || plant === 'HOA_MAU_LVF') return plant;
@@ -158,17 +163,35 @@ function warehouseFromPlant(plant) {
 function stageQuantity(order, operation) {
   const normalized = normalizeJoinKey(operation);
   const stages = order.stageQuantities || {};
-  const releaseQty = productionOrderQuantity(order);
-  if (normalized.includes('CHAT') || normalized.includes('CUT')) return Math.max(0, releaseQty - (Number(stages.LAF_CUT) || 0));
-  if (normalized.includes('MAY') || normalized.includes('SEW')) return Math.max(0, releaseQty - (Number(stages.LVF_SEW) || 0));
-  if (normalized.includes('GO') || normalized.includes('ASSEMB')) return Math.max(0, releaseQty - (Number(stages.LVF_GO) || 0));
-  return releaseQty;
+  const openStages = order.openStageQuantities || {};
+  const orderQty = orderBasisQuantity(order);
+  let key = '';
+  if (normalized.includes('CHAT') || normalized.includes('CUT')) key = 'LAF_CUT';
+  else if (normalized.includes('MAY') || normalized.includes('SEW')) key = 'LVF_SEW';
+  else if (normalized.includes('GO') || normalized.includes('ASSEMB')) key = 'LVF_GO';
+  if (!key) return orderQty;
+  if (openStages[key] !== undefined && openStages[key] !== null && openStages[key] !== '') {
+    return Math.max(0, Number(openStages[key]) || 0);
+  }
+  if (Object.prototype.hasOwnProperty.call(stages, key)) {
+    return Math.max(0, orderQty - (Number(stages[key]) || 0));
+  }
+  return productionOrderQuantity(order);
+}
+
+function chemicalStageOperation(norm, warehouseId) {
+  const explicit = norm.operation || norm.process || norm.stage || '';
+  if (explicit) return explicit;
+  // In the source progress workbook, Chặt is assigned to the LAF / Hóa mẫu LAF route.
+  if (warehouseId === 'HOA_MAU_LAF') return 'Chặt';
+  return '';
 }
 
 /**
  * Canonical theoretical demand by target warehouse.
- * Chemical norms use the source's calculated chemical quantity (R) divided by source order quantity (G),
- * then scale by the released production quantity (TIEN-DO column T). Direct BOM rows use rate × released quantity.
+ * Chemical norms use the source's calculated quantity divided by its source order quantity. LAF chemical
+ * demand follows the remaining Chặt quantity; operation-specific direct BOM lines use remaining process quantity.
+ * Generic BOM lines and unreleased production use the released quantity from TIEN-DO column T.
  */
 export function getTheoreticalRequirements(data, warehouseId) {
   const warehouse = WAREHOUSES.find((item) => item.id === warehouseId);
@@ -183,10 +206,16 @@ export function getTheoreticalRequirements(data, warehouseId) {
   const productionOrders = activeRows(data.productionOrders, data.importMeta, 'production-orders');
   const orders = productionOrders.length ? productionOrders : (data.orders || []);
   const ordersByCommandProduct = new Map();
+  const ordersByCommand = new Map();
   for (const order of orders) {
     const key = commandProductKey(order.orderNo, order);
     if (!ordersByCommandProduct.has(key)) ordersByCommandProduct.set(key, []);
     ordersByCommandProduct.get(key).push(order);
+    const commandKey = normalizeJoinKey(order.orderNo);
+    if (commandKey) {
+      if (!ordersByCommand.has(commandKey)) ordersByCommand.set(commandKey, []);
+      ordersByCommand.get(commandKey).push(order);
+    }
   }
   const ordersBySourceProduct = indexRowsBySourceProduct(orders);
   const automaticCommandIndex = chemicalCommandIndex(allChemicalRows);
@@ -198,6 +227,10 @@ export function getTheoreticalRequirements(data, warehouseId) {
       let ambiguityReason = '';
       let candidates = ordersByCommandProduct.get(commandProductKey(norm.productionOrder, norm)) || [];
       let matchType = 'Chỉ lệnh nguồn';
+      const commandCandidates = ordersByCommand.get(normalizeJoinKey(norm.productionOrder)) || [];
+      if (!candidates.length && commandCandidates.length === 1) {
+        candidates = commandCandidates;
+      }
       if (!candidates.length && (data.orderMappings || []).length) {
         const mappingResults = orders.map((order) => ({ order, result: resolveOrderCommand(order, [], data.orderMappings || []) }));
         const conflictingMappings = mappingResults.filter(({ result }) => result.resolution === 'ambiguous');
@@ -227,12 +260,16 @@ export function getTheoreticalRequirements(data, warehouseId) {
         continue;
       }
       const order = candidates[0];
-      const sourceQty = Number(norm.sourceOrderQty) || 0;
       const releasedQty = productionOrderQuantity(order);
+      if (releasedQty <= 0) continue;
+      const sourceQty = Number(norm.sourceOrderQty) || 0;
       if (!(sourceQty > 0)) {
         unmapped.push({ ...norm, reason: 'Số lượng đơn hàng nguồn bằng 0 nên không thể quy đổi định mức.' });
         continue;
       }
+      const operation = chemicalStageOperation(norm, warehouseId);
+      const basisQty = operation ? stageQuantity(order, operation) : releasedQty;
+      if (basisQty <= 0) continue;
       const rate = (Number(norm.sourceQuantity) || 0) / sourceQty;
       result.push({
         warehouseId,
@@ -248,8 +285,9 @@ export function getTheoreticalRequirements(data, warehouseId) {
         unit: norm.unit || '',
         specification: norm.specification || '',
         rate,
-        basisQty: releasedQty,
-        quantity: rate * releasedQty,
+        basisQty,
+        basisType: operation ? 'Còn lại tại công đoạn ' + operation : 'Số lượng lệnh sản xuất',
+        quantity: rate * basisQty,
         sourceOrderQty: sourceQty,
         source: norm.sourceFile || 'DM-NPL-DH',
         sourceRow: norm.sourceRow,
@@ -351,7 +389,7 @@ export function getTheoreticalRequirements(data, warehouseId) {
         continue;
       }
       if (target !== warehouseId) continue;
-      const basisQty = stageQuantity(order, line.operation);
+      const basisQty = line.operation ? stageQuantity(order, line.operation) : releaseQty;
       if (basisQty <= 0) continue;
       result.push({
         warehouseId,
@@ -489,3 +527,4 @@ export function statusTone(status) {
     'Chờ sản xuất': 'muted',
   })[status] || 'muted';
 }
+
